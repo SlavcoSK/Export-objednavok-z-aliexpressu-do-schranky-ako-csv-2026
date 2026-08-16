@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AliExpress objednávky -> CSV/JSON + obrázky
 // @namespace    SlavcoSK
-// @version      0.9.4
-// @description  Export objednávok AliExpress po produktových riadkoch vrátane URL produktu a obrázka. Nejasné údaje necháva prázdne.
+// @version      0.9.5
+// @description  Export objednávok AliExpress po produktových riadkoch. Dávkové skenovanie, presnejšie varianty/ceny a upozornenie na Google Translator.
 // @match        *://*.aliexpress.com/*
 // @match        *://aliexpress.com/*
 // @match        *://*.aliexpress.us/*
@@ -13,134 +13,98 @@
 (() => {
 'use strict';
 
-const KEY='AE_EXPORT_SK_2026';
-const PANEL='ae-export-sk-panel';
-const SEP=';';
+const VERSION='0.9.5', KEY='AE_EXPORT_SK_2026', PANEL='ae-export-sk-panel', SEP=';', BATCH_SIZE=20, BATCH_DELAY=60;
 const HEAD=['orderId','orderDate','status','seller','productTitle','productVariant','productQuantity','itemPrice','currency','orderTotal','productUrl','imageUrl','detailUrl','sourceUrl','rawProductText','rawOrderText','parserNote'];
 const GENERIC_TITLE=/^(obrázok názvu|image title|image|picture|photo|product image)$/i;
 const BAD_IMAGE=/Se39935ad4d904c8b9abf60a4b71fa315F\.png|6000000002182-2-tps-48-48\.png|Se5bee6b872c34652909ace14ca3d6ab50|\/272x80\.png(?:\?|$)/i;
+const META_LINE=/^(completed|finished|expired|cancelled|canceled|awaiting delivery|processing|shipped|closed|dokončené|platnosť vypršala|zrušené|čaká sa na doručenie|date\s*:|dátum\s*:|ref\.?\s*number\s*:|referenčné číslo\s*:|copy$|kopírovať$|details?$|detaily$)/i;
 
-console.log('[AE Export SK] v0.9.4 spustený', location.href);
+console.log(`[AE Export SK] v${VERSION} spustený`,location.href);
 
 const clean=s=>String(s??'').replace(/\u00a0/g,' ').replace(/[\u200b\u200c\u200d\ufeff]/g,'').replace(/\s+/g,' ').trim();
 const txt=e=>clean(e?.innerText||e?.textContent||'');
+const lines=s=>String(s??'').split(/\r?\n/).map(clean).filter(Boolean);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const abs=u=>{try{return !u?'':u.startsWith('//')?'https:'+u:new URL(u,location.href).href}catch{return u||''}};
 const itemUrl=u=>{u=abs(u);const m=u.match(/\/item\/(?:[^/]+\/)?(\d+)\.html/i);return m?`https://www.aliexpress.com/item/${m[1]}.html`:u};
 const oid=u=>{const m=abs(u).match(/[?&]orderId=(\d+)/i);return m?m[1]:''};
 const rows=()=>{try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{return[]}};
 const save=a=>{localStorage.setItem(KEY,JSON.stringify(a));count()};
-const lines=s=>String(s??'').split(/\r?\n/).map(clean).filter(Boolean);
 
+function translatorActive(){
+  const cls=String(document.documentElement?.className||'');
+  if(/translated-ltr|translated-rtl/i.test(cls))return true;
+  if(document.querySelector('iframe.goog-te-banner-frame,.goog-te-banner-frame'))return true;
+  return /(?:^|;\s*)googtrans=/i.test(document.cookie||'');
+}
 function currencyOf(s){return /€|EUR/i.test(s)?'EUR':/US\s*\$|USD|\$/i.test(s)?'USD':/£|GBP/i.test(s)?'GBP':/CZK|Kč/i.test(s)?'CZK':''}
-function money(s){
-  s=clean(s);
-  const rx=/(US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi;
-  const m=rx.exec(s);
-  return m?{value:m[2].replace(',','.'),currency:currencyOf(m[1])}:{value:'',currency:currencyOf(s)};
-}
-function quantity(s){
-  s=clean(s);
-  for(const r of [/(?:^|\s)(\d+)\s*[x×](?:\s|$)/i,/\b[x×]\s*(\d+)\b/i,/\b(?:quantity|množstvo|počet)\s*[:：]?\s*(\d+)/i]){
-    const m=s.match(r);if(m)return m[1];
-  }
-  return'';
-}
+function money(s){const m=/(US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*([0-9]+(?:[.,][0-9]{1,2})?)/i.exec(clean(s));return m?{value:m[2].replace(',','.'),currency:currencyOf(m[1])}:{value:'',currency:currencyOf(s)}}
+function quantity(s){s=clean(s);for(const r of [/(?:^|\s)[x×]\s*(\d+)\b/i,/(?:^|\s)(\d+)\s*[x×](?:\s|$)/i,/\b(?:quantity|množstvo|počet)\s*[:：]?\s*(\d+)/i]){const m=s.match(r);if(m)return m[1]}return''}
 function detail(root){const a=[...root.querySelectorAll('a[href*="orderId="],a[href*="/p/order/detail"]')].find(x=>oid(x.href));return a?abs(a.href):''}
-function orderId(root){return oid(location.href)||oid(detail(root))||((txt(root).match(/(?:referenčné číslo|reference number|order id|číslo objednávky)\s*[:：]?\s*(\d{12,20})/i)||[])[1]||'')}
-function status(s){
-  const h=clean(s).slice(0,180).toLowerCase();
-  const map=[
-    ['platnosť vypršala','Platnosť vypršala'],['expired','Platnosť vypršala'],
-    ['čaká sa na doručenie','Čaká sa na doručenie'],['awaiting delivery','Čaká sa na doručenie'],
-    ['zrušené','Zrušené'],['cancelled','Zrušené'],['canceled','Zrušené'],
-    ['dokončené','Dokončené'],['completed','Dokončené'],['finished','Dokončené'],
-    ['shipped','Odoslané'],['processing','Spracovanie'],['closed','Uzavreté']
-  ];
-  for(const [needle,label] of map)if(h.startsWith(needle)||(h.indexOf(needle)>=0&&h.indexOf(needle)<45))return label;
-  return'';
-}
+function orderId(root){return oid(location.href)||oid(detail(root))||((txt(root).match(/(?:referenčné číslo|reference number|ref\.? number|order id|číslo objednávky)\s*[:：]?\s*(\d{12,20})/i)||[])[1]||'')}
+function status(s){const h=clean(s).slice(0,180).toLowerCase();const map=[['platnosť vypršala','Platnosť vypršala'],['expired','Platnosť vypršala'],['čaká sa na doručenie','Čaká sa na doručenie'],['awaiting delivery','Čaká sa na doručenie'],['zrušené','Zrušené'],['cancelled','Zrušené'],['canceled','Zrušené'],['dokončené','Dokončené'],['completed','Dokončené'],['finished','Dokončené'],['shipped','Odoslané'],['processing','Spracovanie'],['closed','Uzavreté']];for(const[n,l]of map){const p=h.indexOf(n);if(p>=0&&p<45)return l}return''}
 function seller(root){for(const e of root.querySelectorAll('a[href*="/store/"],[class*="seller"],[class*="store"]')){const s=txt(e);if(s.length>1&&s.length<120&&!/detail|contact|message/i.test(s))return s}return''}
-function orderDate(raw){const ls=lines(raw);for(let i=0;i<ls.length;i++){if(/objednávka bola zadaná|order placed|order date|dátum:/i.test(ls[i])){const m=ls[i].match(/(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\.\s*[A-Za-zÀ-ž]+\s+\d{4})/);return m?m[1]:(ls[i+1]||'')}}return''}
-function total(raw){
-  const t=clean(raw);
-  const m=t.match(/(?:Celkom|Total|Order total|Grand total)\s*[:：]?\s*((?:US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*[0-9]+(?:[.,][0-9]{1,2})?)/i);
-  return m?money(m[1]):{value:'',currency:''};
-}
-function itemPriceFromRaw(raw){
-  const t=clean(raw);
-  if(!t)return{value:'',currency:''};
-  const totalPos=t.search(/(?:Celkom|Total|Order total|Grand total)\s*[:：]?/i);
-  const beforeTotal=totalPos>=0?t.slice(0,totalPos):t;
-  const all=[...beforeTotal.matchAll(/(US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];
-  if(!all.length)return{value:'',currency:''};
-  const m=all[all.length-1];
-  return{value:m[2].replace(',','.'),currency:currencyOf(m[1])};
-}
+function orderDate(raw){const t=clean(raw);let m=t.match(/(?:Date|Dátum)\s*:\s*([^R]{3,35}?)(?=\s+(?:Ref\.|Referenčné|Reference|Copy|Kopírovať))/i);return m?clean(m[1]):''}
+function total(raw){const m=clean(raw).match(/(?:Celkom|Total|Order total|Grand total)\s*[:：]?\s*((?:US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*[0-9]+(?:[.,][0-9]{1,2})?)/i);return m?money(m[1]):{value:'',currency:''}}
+function itemPriceFromRaw(raw){const t=clean(raw),p=t.search(/(?:Celkom|Total|Order total|Grand total)\s*[:：]?/i),b=p>=0?t.slice(0,p):t;const all=[...b.matchAll(/(US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];if(!all.length)return{value:'',currency:''};const m=all.at(-1);return{value:m[2].replace(',','.'),currency:currencyOf(m[1])}}
 
 function anchorsForUrl(root,u){return [...root.querySelectorAll('a[href*="/item/"]')].filter(a=>itemUrl(a.href)===u)}
-function bestContainer(group){
-  let best=null,bestScore=-1;
-  for(const a of group){
-    let e=a;
-    for(let i=0;i<9&&e;i++,e=e.parentElement){
-      const raw=e?.innerText||'',t=clean(raw);if(t.length<8||t.length>2600)continue;
-      const uniq=new Set([...e.querySelectorAll?.('a[href*="/item/"]')||[]].map(x=>itemUrl(x.href)).filter(Boolean));if(uniq.size>1)continue;
-      let score=0;if(/US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč/i.test(t))score+=5;if(/\d+\s*[x×]/i.test(t))score+=2;if(lines(raw).length>=2)score+=2;score+=Math.min(t.length,600)/100;
-      if(score>bestScore){best=e;bestScore=score;}
-    }
-  }
-  return best||group[0]?.parentElement||null;
-}
-function titleFrom(group,c){
-  const candidates=[];
-  for(const a of group){for(const s of [a.getAttribute('title'),a.innerText,a.textContent,a.querySelector?.('img')?.getAttribute('alt')]){const v=clean(s);if(v.length>=6&&!GENERIC_TITLE.test(v))candidates.push(v)}}
-  if(c)for(const a of c.querySelectorAll('a[href*="/item/"]')){const v=clean(a.getAttribute('title')||a.innerText||a.textContent||'');if(v.length>=6&&!GENERIC_TITLE.test(v))candidates.push(v)}
-  candidates.sort((a,b)=>b.length-a.length);return candidates[0]||'';
-}
-function imageCandidates(img){
-  if(!img)return[];const out=[];for(const k of ['data-src','data-lazy-src','data-original','data-image','src']){const v=img.getAttribute?.(k);if(v)out.push(abs(v))}if(img.currentSrc)out.push(abs(img.currentSrc));const ss=img.getAttribute?.('srcset');if(ss)for(const p of ss.split(',')){const u=p.trim().split(/\s+/)[0];if(u)out.push(abs(u))}
-  return[...new Set(out)].filter(u=>u&&!BAD_IMAGE.test(u)&&!/^data:image/i.test(u));
-}
-function productImage(group,c){
-  const scored=[];
-  const add=(img,bonus=0)=>{for(const u of imageCandidates(img)){let score=bonus;const w=img.naturalWidth||img.width||0,h=img.naturalHeight||img.height||0;if(w&&h){const ratio=Math.max(w/h,h/w);if(w<60||h<60||ratio>2.2)continue;}if(/aliexpress-media\.com|alicdn\.com/i.test(u))score+=3;if(/\/kf\//i.test(u))score+=3;if(w>=80&&h>=80)score+=4;const alt=clean(img.alt||'');if(alt&&!GENERIC_TITLE.test(alt))score+=1;scored.push({u,score})}};
-  for(const a of group)for(const img of a.querySelectorAll('img'))add(img,7);if(c)for(const img of c.querySelectorAll('img'))add(img,1);scored.sort((a,b)=>b.score-a.score);return scored[0]?.score>=5?scored[0].u:'';
-}
-function variant(c,title){
-  if(!c)return'';const low=clean(title).toLowerCase();const cand=lines(c.innerText).filter(x=>{const l=clean(x);if(!l)return false;if(low&&(l.toLowerCase()===low||low.includes(l.toLowerCase())))return false;if(/US\s*\$|\$|€|EUR|USD|bezplatné vrátenie|free return|delivery|doručen|dph|vat|pridať do košíka|odstrániť/i.test(l))return false;return l.length<220});
-  return cand.find(l=>/,|mm|cm|\bv\b|\bw\b|°|hz|mhz|gb|mah|black|white|red|blue|čier|biel|model|type|typ|pin|pcs|\bks\b|rolka|china|čína|pevninská/i.test(l))||'';
-}
+function bestContainer(group){let best=null,bestScore=-1;for(const a of group){let e=a;for(let i=0;i<7&&e;i++,e=e.parentElement){const raw=e?.innerText||'',t=clean(raw);if(t.length<8||t.length>2200)continue;const uniq=new Set([...e.querySelectorAll?.('a[href*="/item/"]')||[]].map(x=>itemUrl(x.href)).filter(Boolean));if(uniq.size>1)continue;let score=0;if(/US\s*\$|\$|€|EUR|USD/i.test(t))score+=5;if(/\b[x×]\s*\d+|\d+\s*[x×]/i.test(t))score+=2;score+=Math.min(t.length,500)/100;if(score>bestScore){best=e;bestScore=score}}}return best||group[0]?.parentElement||null}
+function titleFrom(group,c){const a=[];for(const x of group){for(const s of [x.getAttribute('title'),x.innerText,x.textContent,x.querySelector?.('img')?.getAttribute('alt')]){const v=clean(s);if(v.length>=6&&!GENERIC_TITLE.test(v))a.push(v)}}if(c)for(const x of c.querySelectorAll('a[href*="/item/"]')){const v=clean(x.getAttribute('title')||x.innerText||x.textContent||'');if(v.length>=6&&!GENERIC_TITLE.test(v))a.push(v)}a.sort((x,y)=>y.length-x.length);return a[0]||''}
+function variantFromRaw(raw,title,sellerName){const t=clean(raw);if(!t)return'';let part=t;const titlePos=title?t.indexOf(title):-1;if(titlePos>=0)part=t.slice(titlePos+title.length);const pricePos=part.search(/(?:US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*[0-9]+(?:[.,][0-9]{1,2})?/i);if(pricePos>=0)part=part.slice(0,pricePos);part=clean(part);if(!part)return'';const bad=[META_LINE,/^(add to cart|remove|free returns?|write a review|confirm received|track status)$/i];const candidates=lines(part.replace(/\s{2,}/g,'\n')).map(clean).filter(x=>x&&x.length<220&&!bad.some(r=>r.test(x))&&x!==sellerName&&x!==title);const whole=clean(candidates.join(' '));if(!whole||META_LINE.test(whole)||/^(completed|expired|date\s*:)/i.test(whole))return'';return whole}
+function imageCandidates(img){if(!img)return[];const out=[];for(const k of ['data-src','data-lazy-src','data-original','data-image','src']){const v=img.getAttribute?.(k);if(v)out.push(abs(v))}if(img.currentSrc)out.push(abs(img.currentSrc));return[...new Set(out)].filter(u=>u&&!BAD_IMAGE.test(u)&&!/^data:image/i.test(u))}
+function productImage(group){const scored=[];for(const a of group){for(const img of a.querySelectorAll('img')){for(const u of imageCandidates(img)){const w=img.naturalWidth||img.width||0,h=img.naturalHeight||img.height||0;if(w&&h){const ratio=Math.max(w/h,h/w);if(w<60||h<60||ratio>2.2)continue}let score=7;if(/aliexpress-media\.com|alicdn\.com/i.test(u))score+=3;if(/\/kf\//i.test(u))score+=3;if(w>=80&&h>=80)score+=4;scored.push({u,score})}}}scored.sort((a,b)=>b.score-a.score);return scored[0]?.score>=10?scored[0].u:''}
 function meta(root){const raw=root.innerText||'',t=total(raw);return{orderId:orderId(root),orderDate:orderDate(raw),status:status(raw),seller:seller(root),orderTotal:t.value,currency:t.currency,detailUrl:detail(root),sourceUrl:location.href,rawOrderText:clean(raw)}}
-function scanRoot(root){
-  const m=meta(root),out=[];const urls=[...new Set([...root.querySelectorAll('a[href*="/item/"]')].map(a=>itemUrl(a.href)).filter(Boolean))];
-  for(const u of urls){
-    const group=anchorsForUrl(root,u),c=bestContainer(group),raw=clean(c?.innerText||''),pt=titleFrom(group,c),pv=variant(c,pt),pr=itemPriceFromRaw(raw),im=productImage(group,c),note=[];
-    if(!pt)note.push('Názov neistý/prázdny.');if(!pv)note.push('Variant nebol jednoznačný.');if(!im)note.push('URL obrázka nenájdená alebo bola iba zástupná/generická.');if(!m.orderId)note.push('Číslo objednávky nenájdené.');
-    out.push({...m,productTitle:pt,productVariant:pv,productQuantity:quantity(raw),itemPrice:pr.value,currency:pr.currency||m.currency,productUrl:u,imageUrl:im,rawProductText:raw,parserNote:note.join(' ')});
+function scanRoot(root){const m=meta(root),out=[],seen=new Set();for(const a of root.querySelectorAll('a[href*="/item/"]')){const u=itemUrl(a.href);if(!u||seen.has(u))continue;seen.add(u);const group=anchorsForUrl(root,u),c=bestContainer(group),raw=clean(c?.innerText||''),pt=titleFrom(group,c),pv=variantFromRaw(raw,pt,m.seller),pr=itemPriceFromRaw(raw),im=productImage(group),note=[];if(!pt)note.push('Názov neistý/prázdny.');if(!pv)note.push('Variant nebol jednoznačný.');if(!im)note.push('URL obrázka nenájdená alebo nebola jednoznačne naviazaná na produkt.');out.push({...m,productTitle:pt,productVariant:pv,productQuantity:quantity(raw),itemPrice:pr.value,currency:pr.currency||m.currency,productUrl:u,imageUrl:im,rawProductText:raw,parserNote:note.join(' ')})}if(!out.length&&m.orderId)out.push({...m,productTitle:'',productVariant:'',productQuantity:'',itemPrice:'',productUrl:'',imageUrl:'',rawProductText:'',parserNote:'Nebol nájdený jednoznačný produktový odkaz; ručná kontrola.'});return out}
+function roots(){const as=[...document.querySelectorAll('a[href*="orderId="],a[href*="/p/order/detail"]')],out=[],done=new Set();for(const a of as){const id=oid(a.href);if(!id||done.has(id))continue;let e=a,best=null;for(let i=0;i<8&&e?.parentElement;i++,e=e.parentElement){const ids=new Set([...e.querySelectorAll('a[href*="orderId="]')].map(x=>oid(x.href)).filter(Boolean)),t=txt(e);if(t.length>30&&t.length<8000&&ids.size===1)best=e;if(ids.size>1)break}out.push(best||a.parentElement);done.add(id)}return out}
+function key(r){return[r.orderId,itemUrl(r.productUrl)].join('||')}
+function sanitize(r){r={...r};if(GENERIC_TITLE.test(clean(r.productTitle)))r.productTitle='';if(BAD_IMAGE.test(r.imageUrl||''))r.imageUrl='';if(META_LINE.test(clean(r.productVariant)))r.productVariant='';return r}
+function merge(newRows){const map=new Map(rows().map(r=>sanitize(r)).map(r=>[key(r),r]));for(const n0 of newRows){const n=sanitize(n0),k=key(n),old=map.get(k)||{};for(const[k2,v]of Object.entries(n))if(v!==''&&v!=null)old[k2]=v;map.set(k,old)}const a=[...map.values()];save(a);return a}
+
+async function scan(show=true){
+  if(translatorActive()){
+    const ok=confirm('UPOZORNENIE: Google Translator / preklad stránky je aktívny. Môže meniť DOM, spomaľovať skenovanie a skresliť názvy/varianty. Odporúčam ho vypnúť a stránku obnoviť.\n\nPokračovať aj napriek tomu?');
+    if(!ok){setStatus('Skenovanie zrušené: vypni Translator a obnov stránku.',true);return[]}
   }
-  if(!out.length&&m.orderId)out.push({...m,productTitle:'',productVariant:'',productQuantity:'',itemPrice:'',productUrl:'',imageUrl:'',rawProductText:'',parserNote:'Nebol nájdený jednoznačný produktový odkaz; ručná kontrola.'});return out;
+  setBusy(true);
+  const collected=[];
+  try{
+    if(/\/p\/order\/detail\.html/i.test(location.pathname)){
+      collected.push(...scanRoot(document.body));
+      merge(collected);
+      setProgress(1,1);
+    }else{
+      const rr=roots();
+      if(!rr.length){collected.push(...scanRoot(document.body));merge(collected);}
+      else{
+        for(let i=0;i<rr.length;i+=BATCH_SIZE){
+          const batch=rr.slice(i,i+BATCH_SIZE);
+          for(const r of batch)collected.push(...scanRoot(r));
+          merge(collected);
+          setProgress(Math.min(i+BATCH_SIZE,rr.length),rr.length);
+          await sleep(BATCH_DELAY);
+        }
+      }
+    }
+    if(show)setStatus(`Hotovo. Naskenované ${collected.length} produktových riadkov; uložených spolu ${rows().length}.`);
+    return collected;
+  }finally{setBusy(false)}
 }
-function roots(){const as=[...document.querySelectorAll('a[href*="orderId="],a[href*="/p/order/detail"]')],out=[],done=new Set();for(const a of as){const id=oid(a.href);if(!id||done.has(id))continue;let e=a,best=null;for(let i=0;i<10&&e?.parentElement;i++,e=e.parentElement){const ids=new Set([...e.querySelectorAll('a[href*="orderId="]')].map(x=>oid(x.href)).filter(Boolean)),t=txt(e);if(t.length>30&&t.length<8000&&ids.size===1)best=e;if(ids.size>1)break}out.push(best||a.parentElement);done.add(id)}return out}
-function key(r){return[r.orderId,itemUrl(r.productUrl),r.productVariant,r.productTitle].join('||')}
-function sanitize(r){r={...r};if(GENERIC_TITLE.test(clean(r.productTitle)))r.productTitle='';if(BAD_IMAGE.test(r.imageUrl||''))r.imageUrl='';return r}
-function merge(newRows){const map=new Map(rows().map(r=>sanitize(r)).map(r=>[key(r),r]));for(const n0 of newRows){const n=sanitize(n0),old=map.get(key(n))||{};for(const[k,v]of Object.entries(n))if(v!==''&&v!=null)old[k]=v;map.set(key(n),old)}const a=[...map.values()];save(a);return a}
-function scan(show=true){let a=[];if(/\/p\/order\/detail\.html/i.test(location.pathname))a=scanRoot(document.body);else{const rr=roots();for(const r of rr)a.push(...scanRoot(r));if(!rr.length)a=scanRoot(document.body).map(x=>({...x,parserNote:clean(x.parserNote+' Celostránkový fallback; skontrolovať.')}))}const all=merge(a);if(show)setStatus(`Naskenované ${a.length}; uložených spolu ${all.length}.`);return a}
+
 function esc(v){let s=String(v??'').replace(/\r?\n/g,' ');return'"'+s.replace(/"/g,'""')+'"'}
 function csv(){const a=rows(),o=[HEAD.map(esc).join(SEP)];for(const r of a)o.push(HEAD.map(h=>esc(r[h]??'')).join(SEP));return'\uFEFF'+o.join('\r\n')}
 function dl(name,data,type){const u=URL.createObjectURL(new Blob([data],{type})),a=document.createElement('a');a.href=u;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),3000)}
 const stamp=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-function exportCSV(){scan(false);dl(`aliexpress_orders_${stamp()}.csv`,csv(),'text/csv;charset=utf-8');setStatus(`CSV: ${rows().length} riadkov.`)}
-function exportJSON(){scan(false);dl(`aliexpress_orders_${stamp()}.json`,JSON.stringify({exportedAt:new Date().toISOString(),scriptVersion:'0.9.4',rows:rows()},null,2),'application/json;charset=utf-8');setStatus(`JSON: ${rows().length} riadkov.`)}
-function copy(){scan(false);const s=csv();try{if(typeof GM_setClipboard==='function')GM_setClipboard(s,'text');else navigator.clipboard.writeText(s);setStatus(`CSV skopírované: ${rows().length} riadkov.`)}catch(e){setStatus('Kopírovanie zlyhalo: '+e.message)}}
-function clearData(){if(confirm('Vymazať nazbierané exportné údaje?')){localStorage.removeItem(KEY);count();setStatus('Údaje vymazané.')}}
+async function exportCSV(){await scan(false);dl(`aliexpress_orders_${stamp()}.csv`,csv(),'text/csv;charset=utf-8');setStatus(`CSV exportované: ${rows().length} riadkov.`)}
+async function exportJSON(){await scan(false);dl(`aliexpress_orders_${stamp()}.json`,JSON.stringify({exportedAt:new Date().toISOString(),scriptVersion:VERSION,rows:rows()},null,2),'application/json;charset=utf-8');setStatus(`JSON exportované: ${rows().length} riadkov.`)}
+async function copy(){await scan(false);const s=csv();try{if(typeof GM_setClipboard==='function')GM_setClipboard(s,'text');else await navigator.clipboard.writeText(s);setStatus(`CSV skopírované: ${rows().length} riadkov.`)}catch(e){setStatus('Kopírovanie zlyhalo: '+e.message,true)}}
+function clearData(){if(confirm('Vymazať nazbierané exportné údaje?')){localStorage.removeItem(KEY);count();setProgress(0,0);setStatus('Údaje vymazané.')}}
 function count(){const e=document.getElementById('ae-count');if(e)e.textContent=rows().length}
-function setStatus(s){const e=document.getElementById('ae-status');if(e)e.textContent=s}
+function setStatus(s,err=false){const e=document.getElementById('ae-status');if(e){e.textContent=s;e.style.color=err?'#ffb4b4':'#d7ffd7'}}
+function setProgress(done,total){const e=document.getElementById('ae-progress');if(e)e.textContent=total?`Spracované: ${done} / ${total}`:''}
+function setBusy(b){for(const x of document.querySelectorAll(`#${PANEL} button`))x.disabled=b;const e=document.getElementById('ae-busy');if(e)e.textContent=b?'Skenujem po dávkach…':''}
 function btn(p,s,f,c){const b=document.createElement('button');b.textContent=s;b.style.cssText=`width:100%;margin:4px 0;padding:7px;border:0;border-radius:6px;color:white;background:${c};cursor:pointer;font-size:12px`;b.onclick=f;p.append(b)}
-function panel(){
-  if(document.getElementById(PANEL)||!document.body)return;const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:260px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;display:block!important;visibility:visible!important;opacity:1!important;';
-  p.innerHTML='<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div style="font-size:10px;color:#bbb;margin-top:3px">v0.9.4 – presnejšia cena + filtrovanie obrázkov</div><div style="height:6px"></div>';
-  btn(p,'1. Naskenovať túto stránku',()=>scan(true),'#238636');btn(p,'2. Export CSV (Excel)',exportCSV,'#1f6feb');btn(p,'Export JSON (odporúčané)',exportJSON,'#8250df');btn(p,'Kopírovať CSV',copy,'#0969da');btn(p,'Vymazať uložené dáta',clearData,'#b62324');const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';s.textContent='Po aktualizácii verzie najprv vymaž uložené dáta a skenuj odznova.';p.append(s);document.body.append(p);count();
-}
-function init(){if(document.body)panel();else document.addEventListener('DOMContentLoaded',panel,{once:true});setTimeout(panel,500);setTimeout(panel,1500);setTimeout(panel,4000)}
-init();new MutationObserver(()=>{if(!document.getElementById(PANEL))panel()}).observe(document.documentElement,{childList:true,subtree:true});
+function panel(){if(document.getElementById(PANEL)||!document.body)return;const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:270px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – dávkové skenovanie + oprava variantov</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni a obnov stránku.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;btn(p,'1. Naskenovať túto stránku',()=>scan(true),'#238636');btn(p,'2. Export CSV (Excel)',exportCSV,'#1f6feb');btn(p,'Export JSON (odporúčané)',exportJSON,'#8250df');btn(p,'Kopírovať CSV',copy,'#0969da');btn(p,'Vymazať uložené dáta',clearData,'#b62324');const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';s.textContent='Nejasné údaje sa nedohadujú. Google Translator nechaj pri exporte vypnutý.';p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none'}
+function init(){if(document.body)panel();else document.addEventListener('DOMContentLoaded',panel,{once:true});setTimeout(panel,500);setTimeout(panel,1500)}
+init();
 })();
