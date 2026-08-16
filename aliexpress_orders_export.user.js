@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AliExpress objednávky -> CSV/JSON + obrázky
 // @namespace    SlavcoSK
-// @version      0.9.7
-// @description  Export objednávok AliExpress po produktových riadkoch. Viacnásobné načítanie cez View orders s obnovou stránky a dlhšími čakaniami medzi priechodmi.
+// @version      0.9.8
+// @description  Export objednávok AliExpress po produktových riadkoch. Viacnásobné načítanie cez View orders až do ustálenia, s kratším 3 s čakaním medzi priechodmi.
 // @match        *://*.aliexpress.com/*
 // @match        *://aliexpress.com/*
 // @match        *://*.aliexpress.us/*
@@ -13,10 +13,10 @@
 (() => {
 'use strict';
 
-const VERSION='0.9.7', KEY='AE_EXPORT_SK_2026', MULTI_KEY='AE_EXPORT_SK_2026_MULTI', PANEL='ae-export-sk-panel', SEP=';';
+const VERSION='0.9.8', KEY='AE_EXPORT_SK_2026', MULTI_KEY='AE_EXPORT_SK_2026_MULTI', PANEL='ae-export-sk-panel', SEP=';';
 const BATCH_SIZE=20, BATCH_DELAY=80;
-const VIEW_WAIT_MS=9000, VIEW_SETTLE_MS=1800, VIEW_BETWEEN_CLICKS_MS=1600, VIEW_MAX_CLICKS=120;
-const MULTI_MAX_PASSES=6, MULTI_STABLE_REQUIRED=2, PASS_START_DELAY_MS=3500, PASS_RELOAD_DELAY_MS=9000;
+const VIEW_WAIT_MS=9000, VIEW_SETTLE_MS=3000, VIEW_BETWEEN_CLICKS_MS=1600, VIEW_MAX_CLICKS=120;
+const MULTI_MAX_PASSES=12, MULTI_STABLE_REQUIRED=2, PASS_START_DELAY_MS=3000, PASS_RELOAD_DELAY_MS=3000;
 const HEAD=['orderId','orderDate','status','seller','productTitle','productVariant','productQuantity','itemPrice','currency','orderTotal','productUrl','imageUrl','detailUrl','sourceUrl','rawProductText','rawOrderText','parserNote'];
 const GENERIC_TITLE=/^(obrázok názvu|image title|image|picture|photo|product image)$/i;
 const BAD_IMAGE=/Se39935ad4d904c8b9abf60a4b71fa315F\.png|6000000002182-2-tps-48-48\.png|Se5bee6b872c34652909ace14ca3d6ab50|\/272x80\.png(?:\?|$)/i;
@@ -125,7 +125,7 @@ async function waitForMoreOrders(before){
   while(Date.now()-start<VIEW_WAIT_MS){
     await sleep(300);
     const now=roots().length;
-    if(now>best){best=now;lastChange=Date.now();setStatus(`AliExpress pridáva objednávky… ${best}. Čakám na ustálenie.`)}
+    if(now>best){best=now;lastChange=Date.now();setStatus(`AliExpress pridáva objednávky… ${best}. Čakám 3 s na ustálenie.`)}
     if(best>before&&Date.now()-lastChange>=VIEW_SETTLE_MS)return best;
   }
   return best;
@@ -252,7 +252,7 @@ function setStatus(s,err=false){const e=document.getElementById('ae-status');if(
 function setProgress(done,total){const e=document.getElementById('ae-progress');if(e)e.textContent=total?`Spracované: ${done} / ${total}`:''}
 function setBusy(b){for(const x of document.querySelectorAll(`#${PANEL} button:not([data-stop="1"])`))x.disabled=b;const e=document.getElementById('ae-busy');if(e)e.textContent=b?'Pracujem… View orders, skenovanie a viacnásobné priechody.':''}
 function btn(p,s,f,c,stop=false){const b=document.createElement('button');b.textContent=s;if(stop)b.dataset.stop='1';b.style.cssText=`width:100%;margin:4px 0;padding:7px;border:0;border-radius:6px;color:white;background:${c};cursor:pointer;font-size:12px`;b.onclick=f;p.append(b)}
-function panel(){if(document.getElementById(PANEL)||!document.body)return;const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:300px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – viacnásobné View orders + pomalšie čakanie</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni a obnov stránku.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;btn(p,'1. Viacnásobne načítať + naskenovať',startMultiPass,'#238636');btn(p,'Zastaviť viacnásobné čítanie',stopMulti,'#a66321',true);btn(p,'2. Export CSV (Excel)',exportCSV,'#1f6feb');btn(p,'Export JSON (odporúčané)',exportJSON,'#8250df');btn(p,'Kopírovať CSV',copy,'#0969da');btn(p,'Vymazať uložené dáta',clearData,'#b62324');const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';s.textContent='Viac priechodov sa zlučuje. Medzi View orders a obnovami je zámerne dlhšie čakanie. Obrázky sú zatiaľ bez ďalších zmien.';p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none'}
+function panel(){if(document.getElementById(PANEL)||!document.body)return;const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:300px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – viacnásobné View orders + 3 s ustálenie</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni a obnov stránku.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;btn(p,'1. Viacnásobne načítať + naskenovať',startMultiPass,'#238636');btn(p,'Zastaviť viacnásobné čítanie',stopMulti,'#a66321',true);btn(p,'2. Export CSV (Excel)',exportCSV,'#1f6feb');btn(p,'Export JSON (odporúčané)',exportJSON,'#8250df');btn(p,'Kopírovať CSV',copy,'#0969da');btn(p,'Vymazať uložené dáta',clearData,'#b62324');const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';s.textContent='Viac priechodov sa zlučuje. Po pridaní objednávok a medzi priechodmi čaká 3 s. Timeout na pomalú odpoveď View orders zostáva max. 9 s. Obrázky sú zatiaľ bez ďalších zmien.';p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none'}
 function init(){
   if(document.body)panel();else document.addEventListener('DOMContentLoaded',panel,{once:true});
   setTimeout(panel,500);setTimeout(panel,1500);
