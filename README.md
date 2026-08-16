@@ -6,7 +6,7 @@ Tampermonkey userscript na získanie histórie objednávok z AliExpressu. Projek
 2. postupné čítanie presných údajov zo stránky **Details**,
 3. obrázky budú riešené až v ďalšom kroku.
 
-Skript je zámerne konzervatívny. Ak nedokáže bezpečne oddeliť názov a variant alebo priradiť produktový URL, údaj radšej nechá prázdny a zachová bezpečný text položky na kontrolu.
+Skript je zámerne konzervatívny. Ak nedokáže bezpečne oddeliť názov, variant alebo produktový URL, hodnotu radšej nechá prázdnu a zachová text položky na kontrolu.
 
 ## Hlavný userscript
 
@@ -18,40 +18,64 @@ Priamy Raw odkaz:
 
 ## Aktuálna verzia
 
-**0.9.10**
+**0.9.11**
 
-## Čo je nové vo v0.9.10
+Parser Details:
 
-Verzia 0.9.10 opravuje parser stránky **Details** po prvom reálnom teste v0.9.9.
+`0.9.11-dom-variant-v3`
 
-Hlavné zmeny:
+## Čo je nové vo v0.9.11
 
-- položky sa už nehľadajú iba podľa jedného konkrétneho DOM kontajnera,
-- parser najprv vyhľadá textové bloky položiek medzi detailmi objednávky a `Subtotal`,
-- za hranicu jednej položky považuje väzbu **cena + `xN`**,
-- množstvo sa číta iba z hodnoty bezprostredne za cenou, napr. `US $14.41 x1`,
-- čísla ako `100X`, `20X`, `100:1` alebo podobné údaje v názve produktu sa už nesmú zameniť za množstvo,
-- podporované sú aj zrušené objednávky, ktoré nemajú riadok `Estimated delivery date`,
-- pri každej položke sa zachováva `productLineText` – celý text názvu + variantu pred cenou,
-- ak DOM dovolí jednoznačne určiť názov produktu, zvyšok `productLineText` sa uloží ako variant,
-- ak hranicu názov/variant nemožno bezpečne určiť, skript ju nehádá,
-- `rawOrderDetailText` už neobsahuje celý text stránky,
-- meno/adresa príjemcu, telefón a platobná metóda sa do detailového exportu neukladajú,
-- staré Details údaje vytvorené parserom 0.9.9 sa pri prvom spustení 0.9.10 automaticky odstránia; **Orders údaje zostávajú zachované**,
-- pribudlo tlačidlo **Vymazať iba Details**.
+Verzia 0.9.11 dopĺňa presnejšie čítanie **variantu každej položky priamo z DOM stránky Details**.
 
-## Dôležitá zmena oproti 0.9.9
+Na AliExpress Details je pri mnohých produktoch zobrazenie v tvare:
 
-Parser 0.9.9 síce správne otváral jednotlivé stránky Details a čítal dátumy, subtotal a total, ale pri väčšine objednávok nevedel rozpoznať produktové bloky. Navyše pôvodný spôsob čítania množstva mohol napríklad `100X` v názve produktu považovať za 100 kusov.
+`názov produktu`
 
-Verzia 0.9.10 preto oddelila:
+`variant / model / konfigurácia`
 
-- rozpoznanie položiek z textu,
-- presné čítanie ceny a množstva,
-- rozdelenie názvu a variantu,
-- priradenie produktového URL.
+`cena xN`
 
-Ak je istá iba prvá časť, ostatné polia zostanú prázdne namiesto odhadu.
+Nový parser preto dáva najvyššiu prioritu samostatnému textovému riadku medzi názvom produktu a cenou.
+
+Príklady, ktoré má správne zachytiť:
+
+- KSD9700: `Metal 10A, Normally closed, 135C`, `130C`, `110C`, `105C`, `100C`, `95C` atď.,
+- NTC MF58: `10K`,
+- FPC konektor: `32P, Bottom Contact, 0.5MM`,
+- SW420: `20PCS`,
+- tlakový snímač: `12V 0.5-4.5V 1/8N, 750psi gauge`,
+- iný tlakový snímač: `12V in 0.5 4.5V 1/8N, 16bar G with cable`.
+
+Ak taký samostatný variantový riadok v DOM existuje, uloží sa do `productVariant` a zdroj do `productVariantSource`.
+
+Nové pomocné polia pri detailnej položke:
+
+- `productTitleSource`,
+- `productVariantSource`.
+
+Typický zdroj presného variantu bude:
+
+`details-dom-row` alebo `dom-row-between-title-price`.
+
+Ak samostatný riadok neexistuje, parser sa môže oprieť o už známu hranicu názvu v `productLineText`. Ak ani tá nie je jednoznačná, variant zostane prázdny.
+
+## Dôležité pravidlo pre množstvo
+
+Množstvo objednaných balení sa naďalej číta **iba z `xN` priamo pri cene**.
+
+Napríklad:
+
+`20PCS Thermal Resistor ... 10K US $5.02 x1`
+
+znamená:
+
+- názov produktu obsahuje `20PCS` – obsah balenia,
+- variant je `10K`,
+- cena položky je `5.02 USD`,
+- `productQuantity = 1` – objednané jedno balenie.
+
+Rovnako čísla ako `100X`, `100:1`, `20PCS`, `750psi`, `16bar` alebo teplota `135C` sa nesmú zameniť za objednané množstvo.
 
 ## Fáza 1 – zoznam Orders
 
@@ -64,9 +88,9 @@ Aktuálne nastavenie:
 - približne **3 s** na ustálenie po pribudnutí objednávok,
 - približne **3 s** po reloadnutí stránky,
 - približne **3 s** medzi priechodmi,
-- maximálne **9 s** na reakciu po kliknutí na `View orders`; ide iba o horný timeout, nie vždy pevné čakanie.
+- maximálne **9 s** na reakciu po kliknutí na `View orders`; ide iba o horný timeout.
 
-Už zachytené `orderId` sa naprieč priechodmi zlučujú a nestratia sa, ak ich AliExpress v ďalšom priechode nezobrazí.
+Už zachytené `orderId` sa naprieč priechodmi zlučujú.
 
 ## Fáza 2 – presné údaje z Details
 
@@ -74,16 +98,16 @@ Po dokončení fázy 1 kliknite na:
 
 **2. Načítať presné údaje z Details**
 
-Skript vytvorí front známych `orderId` a postupne otvára stránky:
+Skript postupne otvára stránky:
 
 `https://www.aliexpress.com/p/order/detail.html?...&orderId=...`
 
-Používa existujúcu prihlásenú session AliExpressu. Meno ani heslo sa do userscriptu neukladajú.
+Používa existujúcu prihlásenú session AliExpressu. Prihlasovacie meno ani heslo sa do userscriptu neukladajú.
 
-Pri každej objednávke sa skript snaží získať:
+Pri každej objednávke sa ukladajú napríklad:
 
 - `orderId`,
-- predajcu,
+- predajca,
 - dátum vytvorenia objednávky,
 - dátum zaplatenia,
 - dátum dokončenia zásielky,
@@ -91,41 +115,47 @@ Pri každej objednávke sa skript snaží získať:
 - `Subtotal`,
 - `Total`,
 - menu,
-- počet jednotlivých položiek.
+- jednotlivé produktové položky.
 
-Pri každej detailnej položke sa ukladajú najmä:
+Pri každej detailnej položke sa ukladajú:
 
 - `itemIndex`,
-- `productLineText` – celý text produktu pred cenou,
-- `productTitle` – iba ak sa dá jednoznačne určiť,
-- `productVariant` – zvyšok za jednoznačným názvom,
-- `estimatedDeliveryDate`, ak existuje,
-- `productQuantity` z presného `xN` pri cene,
+- `productLineText`,
+- `productTitle`,
+- `productTitleSource`,
+- `productVariant`,
+- `productVariantSource`,
+- `estimatedDeliveryDate`,
+- `productQuantity`,
 - `itemPrice`,
 - `currency`,
-- `productUrl`, iba ak ho možno bezpečne priradiť,
-- `rawItemText` – bezpečný text konkrétnej položky,
+- `productUrl`,
+- `rawItemText`,
 - `parserNote`.
 
-### Príklad pravidla pre množstvo
+## Ako parser v0.9.11 hľadá variant
 
-Text:
+Parser kombinuje dve vrstvy:
 
-`... Oscilloscope Probe 100:1 100X ... US $14.41x1`
+1. textový parser rozdelí objednávku na samostatné položky podľa väzby **cena + `xN`**,
+2. DOM parser nájde najmenší produktový blok, v ktorom je presne jedna väzba cena + `xN`, a prečíta jednotlivé textové riadky pred cenou.
 
-sa musí interpretovať ako:
+Ak blok obsahuje napríklad:
 
-- vlastnosť produktu: `100:1`, `100X`,
-- cena: `14.41`,
-- objednané množstvo: **1**.
+`KSD9700 250V 5A 10A 16A 40~155 Degree ...`
 
-Množstvo sa teda nečíta z názvu, ale iba z `x1` bezprostredne za cenou.
+`Metal 10A, Normally closed, 130C`
 
-## Zrušené objednávky
+`US $1.16 x1`
 
-Niektoré zrušené objednávky nemajú `Estimated delivery date`. V takom prípade parser začne produktovú časť až za známym názvom predajcu z vrstvy Orders a skončí pred `Subtotal`.
+uloží sa:
 
-Ak ani tak nemožno bezpečne určiť produktovú časť, skript nič nedohaduje.
+- `productTitle = KSD9700 ...`,
+- `productVariant = Metal 10A, Normally closed, 130C`,
+- `productQuantity = 1`,
+- `itemPrice = 1.16`.
+
+Pri objednávke s viacerými variantmi rovnakého produktu sa položky mapujú v poradí DOM. To je dôležité napríklad pri 11 rôznych teplotách KSD9700.
 
 ## Súkromie
 
@@ -137,72 +167,67 @@ Fáza Details zámerne neukladá:
 - platobnú metódu,
 - prihlasovacie údaje.
 
-`rawOrderDetailText` vo v0.9.10 už nie je celý text stránky. Je zostavený iba z bezpečných údajov potrebných pre databázu objednávok: číslo objednávky, dátumy, predajca, text položiek, subtotal a total.
+`rawOrderDetailText` sa skladá iba z bezpečných údajov potrebných pre databázu: číslo objednávky, dátumy, predajca, položky, subtotal a total.
 
-Pri aktualizácii z 0.9.9 sa staré detailové dáta automaticky odstránia práve preto, že starý formát mohol obsahovať celý text stránky. **Vrstva Orders sa pritom nemaže.**
+## Prechod z 0.9.10 na 0.9.11
 
-## Odkazy Details
+Pretože sa zmenil parser variantov, v0.9.11 pri prvom spustení automaticky odstráni starú vrstvu **Details** vytvorenú predchádzajúcim parserom.
 
-Skript preferuje presný `href` tlačidla **Details** z DOM stránky Orders.
+**Vrstva Orders a zoznam známych objednávok zostanú zachované.**
 
-Ak je dostupný napríklad:
-
-`https://www.aliexpress.com/p/order/detail.html?spm=...&orderId=3073820008318237`
-
-použije sa celý odkaz.
-
-Ak presný odkaz pre staršiu objednávku nie je momentálne v DOM, skript môže použiť uložený detailový URL alebo fallback podľa `orderId`. Pri takom zázname sa zdroj odkazu uvedie v `detailUrlSource` a prípadne v `parserNote`.
+Fázu 1 preto netreba spúšťať znova iba kvôli aktualizácii parsera Details.
 
 ## Obnova po prerušení
 
 Stav fázy 2 sa priebežne ukladá do `localStorage`.
 
-Ak sa počítač vypne alebo Chrome zavrie, rozpracovaný beh v0.9.10 je možné po návrate obnoviť od poslednej nespracovanej objednávky.
+Ak sa počítač vypne alebo sa Chrome zavrie, rozpracovaný beh rovnakej verzie parsera možno po návrate obnoviť od poslednej nespracovanej objednávky.
 
 Medzi jednotlivými detailmi je približne **3 s** pauza a na načítanie jednej detailovej stránky sa čaká maximálne približne **15 s**.
 
-## Ako spustiť nový test v0.9.10
+## Odporúčaný test v0.9.11
 
 1. Aktualizujte userscript cez **Raw**.
-2. Overte v paneli verziu **0.9.10**.
-3. Vypnite Google Translator.
-4. Otvorte hlavnú stránku **Account → Orders**.
-5. Ak už máte dokončenú fázu 1, **nespúšťajte ju znovu iba kvôli 0.9.10**.
-6. Staré Details z 0.9.9 sa po aktualizácii odstránia automaticky; Orders zostanú.
-7. Kliknite **2. Načítať presné údaje z Details**.
-8. Na prvý test nechajte spracovať približne 5–10 objednávok.
-9. Kliknite **Zastaviť Details**.
-10. Použite **Export JSON (Orders + Details)** a skontrolujte výsledok.
-11. Až po overení malej vzorky nechajte skript prejsť celý zoznam objednávok.
+2. Obnovte AliExpress cez `Ctrl+F5`.
+3. Skontrolujte v paneli **v0.9.11 – Details DOM variant v3**.
+4. Vypnite Google Translator.
+5. Otvorte **Account → Orders**.
+6. Fázu 1 znovu nespúšťajte, ak už máte kompletný zoznam Orders.
+7. Spustite **2. Načítať presné údaje z Details**.
+8. Nechajte spracovať približne 8–10 objednávok.
+9. Skontrolujte najmä objednávku `3073820008378237` s viacerými KSD9700 variantmi a objednávku `3073820008558237` s dvoma tlakovými snímačmi.
+10. Kliknite **Zastaviť Details**.
+11. Exportujte **JSON (Orders + Details)** a výsledok skontrolujte pred celým behom 437 objednávok.
 
 ## Ovládacie tlačidlá
 
-- **1. Viacnásobne načítať + naskenovať** – fáza 1.
-- **Zastaviť fázu 1** – zastaví ďalšie priechody Orders.
-- **2. Načítať presné údaje z Details** – fáza 2.
-- **Zastaviť Details** – zastaví fázu 2 bez vymazania už správne načítaných detailov.
-- **Vymazať iba Details** – zmaže iba detailovú vrstvu a jej stav; Orders zostanú zachované.
-- **3. Export CSV (Orders)** – export vrstvy Orders.
-- **Export JSON (Orders + Details)** – odporúčaný kontrolný export.
-- **Kopírovať CSV** – skopíruje CSV do schránky.
-- **Vymazať všetky uložené dáta** – zmaže Orders aj Details; používajte len zámerne.
+- **1. Viacnásobne načítať + naskenovať** – fáza 1,
+- **Zastaviť fázu 1** – zastaví ďalšie priechody Orders,
+- **2. Načítať presné údaje z Details** – fáza 2,
+- **Zastaviť Details** – zastaví fázu 2 bez zmazania hotových detailov,
+- **Vymazať iba Details** – zmaže iba detailovú vrstvu a jej stav,
+- **3. Export CSV (Orders)** – export vrstvy Orders,
+- **Export JSON (Orders + Details)** – odporúčaný kontrolný export,
+- **Kopírovať CSV** – skopíruje CSV do schránky,
+- **Vymazať všetky uložené dáta** – zmaže Orders aj Details.
 
 ## Obrázky
 
-Obrázky zatiaľ nie sú cieľom fázy 2. Najprv sa overuje správnosť:
+Obrázky zatiaľ nie sú cieľom fázy 2. Najprv stabilizujeme:
 
-- počtu položiek,
-- názvu/produktového riadku,
-- variantu,
-- množstva,
+- počet položiek,
+- názvy,
+- varianty,
+- množstvá,
 - ceny,
-- dátumov a subtotal/total.
+- dátumy,
+- subtotal a total.
 
-Až po stabilizovaní týchto údajov bude nasledovať samostatný krok na obrázky zakúpených dielov a súčiastok.
+Až potom bude nasledovať samostatná fáza pre obrázky.
 
 ## Google Translator
 
-Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť text a DOM stránky počas čítania a tým zhoršiť presnosť parsera.
+Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť text a DOM počas čítania a tým zhoršiť presnosť parsera.
 
 ## Inštalácia / aktualizácia
 
@@ -211,10 +236,10 @@ Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť te
 3. Tampermonkey ponúkne aktualizáciu existujúceho skriptu.
 4. Uložte skript.
 5. Obnovte AliExpress cez `Ctrl+F5`.
-6. Skontrolujte, že panel ukazuje **v0.9.10 – Details text parser v2**.
+6. Skontrolujte **v0.9.11 – Details DOM variant v3**.
 
 ## Poznámka k presnosti
 
-AliExpress často mení HTML a správanie stránky. Preto parser používa kombináciu textových údajov, údajov z DOM a už bezpečne uložených údajov z vrstvy Orders.
+AliExpress môže meniť HTML štruktúru. Preto parser kombinuje text, DOM a už bezpečne uložené údaje z vrstvy Orders.
 
-Ak si nie je istý hranicou názov/variant alebo URL produktu, hodnotu nemá domýšľať. Celý text položky zostane v `productLineText` a neistota sa uvedie v `parserNote`.
+Ak si nie je istý, údaj nemá domýšľať. Celý text položky zostáva v `productLineText` a neistota sa uvedie v `parserNote`.
