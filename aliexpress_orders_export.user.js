@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AliExpress objednávky -> CSV/JSON + Details
 // @namespace    SlavcoSK
-// @version      0.9.10
-// @description  Viacnásobný export objednávok AliExpress + presnejší parser Details podľa textových blokov položiek. Bez ukladania adresy, telefónu a platobnej metódy.
+// @version      0.9.11
+// @description  Viacnásobný export objednávok AliExpress + presný parser Details. Variant má prioritu zo samostatného riadku medzi názvom a cenou.
 // @match        *://*.aliexpress.com/*
 // @match        *://aliexpress.com/*
 // @match        *://*.aliexpress.us/*
@@ -13,8 +13,8 @@
 (() => {
 'use strict';
 
-const VERSION='0.9.10';
-const DETAIL_PARSER_VERSION='0.9.10-text-items-v2';
+const VERSION='0.9.11';
+const DETAIL_PARSER_VERSION='0.9.11-dom-variant-v3';
 const KEY='AE_EXPORT_SK_2026';
 const MULTI_KEY='AE_EXPORT_SK_2026_MULTI';
 const DETAIL_KEY='AE_EXPORT_SK_2026_DETAILS';
@@ -72,8 +72,7 @@ function migrateOldDetails(){
   const oldState=st&&st.parserVersion!==DETAIL_PARSER_VERSION;
   const oldRecords=d.some(x=>x?.parserVersion!==DETAIL_PARSER_VERSION);
   if(oldState||oldRecords){
-    // v0.9.9 ukladal chybný parser a celý text stránky vrátane osobných údajov.
-    // Pri v0.9.10 ho automaticky odstránime; Orders údaje sa nemenia.
+    // Nová verzia parsera musí prečítať Details nanovo. Vrstva Orders sa nemení.
     resetDetailsOnly(true);
     sessionStorage.setItem('AE_EXPORT_SK_2026_DETAILS_MIGRATED','1');
   }
@@ -212,7 +211,7 @@ async function continueMultiPass(){
   }catch(e){const cur=multiState()||st;cur.running=false;cur.error=String(e?.message||e);saveMulti(cur);setStatus('Fáza 1 sa zastavila: '+cur.error,true)}finally{multiRunningNow=false;setBusy(false)}
 }
 
-// ---------------- FÁZA 2: DETAILS 0.9.10 ----------------
+// ---------------- FÁZA 2: DETAILS 0.9.11 ----------------
 function detailLinkMap(){
   const best=new Map();
   for(const a of document.querySelectorAll('a[href*="/p/order/detail"],a[href*="orderId="]')){
@@ -251,7 +250,6 @@ async function startDetails(){
     if(confirm(`Existuje rozpracované čítanie Details: ${old.index||0} / ${old.queue.length}. Pokračovať od poslednej objednávky?`)){old.running=true;old.resumedAt=new Date().toISOString();saveDetailState(old);continueDetails();return}
   }
 
-  // Nový beh Details vždy začína čistou detailovou vrstvou, Orders sa zachovajú.
   resetDetailsOnly(true);
   const ids=uniqueKnownOrderIds();if(!ids.length){setStatus('Nemám zoznam orderId. Najprv dokonči fázu 1.',true);return}
   const domMap=detailLinkMap(),spm=firstCurrentSpm(domMap);
@@ -300,15 +298,12 @@ function detailRegion(cleanRaw,expectedId,sellerName){
   const est=before.search(/\bEstimated delivery date\s*:\s*/i);
   if(est>=0)return before.slice(est);
 
-  // Zrušené objednávky často nemajú Estimated delivery date.
-  // Najbezpečnejšie je začať až za presným menom predajcu uloženým z Orders.
   if(sellerName){
     const pm=before.search(/\bPayment method\s*:\s*/i);
     const sellerPos=before.indexOf(sellerName,pm>=0?pm:0);
     if(sellerPos>=0)return before.slice(sellerPos+sellerName.length);
   }
 
-  // Druhý konzervatívny fallback: prvý známy názov produktu z vrstvy Orders.
   const knownTitles=storedRowsForOrder(expectedId).map(r=>clean(r.productTitle)).filter(Boolean);
   let first=-1;
   for(const t of knownTitles){const p=before.indexOf(t);if(p>=0&&(first<0||p<first))first=p}
@@ -326,7 +321,6 @@ function cleanDetailPrefix(prefix){
     deliveryDate=clean(m[1]);
     p=p.slice((m.index||0)+m[0].length);
   }
-  // Zvyšky z predchádzajúcej položky. Odstránime len známe servisné texty.
   p=p.replace(/^(?:(?:VAT included|Free returns?|Add to cart|Returns\/refunds|Return\/refund|View)\s*)+/i,'');
   return{descriptor:clean(p),deliveryDate};
 }
@@ -387,6 +381,132 @@ function detailDomTitleCandidates(region){
   return [...best.values()].sort((a,b)=>a.pos-b.pos||b.score-a.score||b.title.length-a.title.length);
 }
 
+function isDetailUiLine(v){
+  v=clean(v);
+  if(!v)return true;
+  if(/^\d{1,3}$/.test(v))return true;
+  return /^(?:Estimated delivery date\s*:|VAT included|Free returns?|Add to cart|Returns\/refunds|Return\/refund|View|Choice)$/i.test(v);
+}
+
+function parsePriceQtyLine(v){
+  const m=clean(v).match(/((?:US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*([0-9]+(?:[.,][0-9]{1,2})?))\s*[x×]\s*(\d+)\b/i);
+  return m?{itemPrice:String(m[2]).replace(',','.'),currency:currencyOf(m[1]),productQuantity:String(m[3])}:null;
+}
+
+function detailDomBlockInfo(block){
+  const rawLines=lines(block?.innerText||'');
+  let priceIndex=-1,pq=null;
+  for(let i=0;i<rawLines.length;i++){const x=parsePriceQtyLine(rawLines[i]);if(x){priceIndex=i;pq=x;break}}
+  if(priceIndex<0||!pq)return null;
+
+  const before=[];let deliveryDate='';
+  for(const line0 of rawLines.slice(0,priceIndex)){
+    const line=clean(line0);
+    const dm=line.match(/^Estimated delivery date\s*:\s*(.+)$/i);
+    if(dm){deliveryDate=clean(dm[1]);continue}
+    if(isDetailUiLine(line))continue;
+    before.push(line);
+  }
+  if(!before.length)return null;
+
+  const itemAnchors=[...block.querySelectorAll('a[href*="/item/"]')];
+  const urls=[...new Set(itemAnchors.map(a=>itemUrl(a.href)).filter(Boolean))];
+  const productUrl=urls.length===1?urls[0]:'';
+
+  const anchorTexts=[];
+  for(const a of itemAnchors){
+    for(const v0 of [a.getAttribute('title'),a.getAttribute('aria-label'),a.innerText,a.textContent]){
+      const v=clean(v0);
+      if(v.length>=6&&!GENERIC_TITLE.test(v)&&!parsePriceQtyLine(v)&&!isDetailUiLine(v))anchorTexts.push(v);
+    }
+  }
+  anchorTexts.sort((a,b)=>b.length-a.length);
+
+  let title='',variant='',variantSource='';
+  let titleLineIndex=-1;
+  for(const at of anchorTexts){
+    const idx=before.findIndex(line=>line===at||line.includes(at)||at.includes(line));
+    if(idx>=0){
+      title=at.length>=before[idx].length?at:before[idx];
+      titleLineIndex=idx;
+      break;
+    }
+  }
+
+  if(titleLineIndex>=0){
+    const tail=before.slice(titleLineIndex+1);
+    if(tail.length){variant=clean(tail.join(' '));variantSource='dom-row-between-title-price'}
+  }else if(before.length===1){
+    title=before[0];
+  }else{
+    title=clean(before.slice(0,-1).join(' '));
+    variant=clean(before.at(-1));
+    variantSource='dom-last-row-before-price';
+  }
+
+  return{
+    node:block,
+    productUrl,
+    productTitle:clean(title),
+    productVariant:clean(variant),
+    productVariantSource:variantSource,
+    productLineText:clean(before.join(' ')),
+    estimatedDeliveryDate:deliveryDate,
+    itemPrice:pq.itemPrice,
+    currency:pq.currency,
+    productQuantity:pq.productQuantity
+  };
+}
+
+function detailDomItemRows(){
+  const out=[],seen=new Set();
+  for(const a of document.querySelectorAll('a[href*="/item/"]')){
+    let e=a,best=null,bestLen=Infinity;
+    for(let level=0;level<11&&e&&e!==document.body;level++,e=e.parentElement){
+      const t=clean(e.innerText||'');
+      if(t.length<12||t.length>2800)continue;
+      const pqs=[...t.matchAll(/((?:US\s*\$|\$|€|EUR|USD|£|GBP|CZK|Kč)\s*[0-9]+(?:[.,][0-9]{1,2})?)\s*[x×]\s*\d+\b/gi)];
+      if(pqs.length!==1)continue;
+      const urls=new Set([...e.querySelectorAll('a[href*="/item/"]')].map(x=>itemUrl(x.href)).filter(Boolean));
+      if(urls.size>1)continue;
+      if(t.length<bestLen){best=e;bestLen=t.length}
+    }
+    if(best&&!seen.has(best)){
+      const info=detailDomBlockInfo(best);
+      if(info){seen.add(best);out.push(info)}
+    }
+  }
+  out.sort((a,b)=>a.node===b.node?0:(a.node.compareDocumentPosition(b.node)&Node.DOCUMENT_POSITION_FOLLOWING?-1:1));
+  return out;
+}
+
+function mapDetailDomRows(segments){
+  const domRows=detailDomItemRows(),mapped=Array(segments.length).fill(null),used=new Set();
+
+  if(domRows.length===segments.length){
+    for(let i=0;i<segments.length;i++){
+      const d=domRows[i],s=segments[i];
+      if(d&&d.itemPrice===s.itemPrice&&d.productQuantity===s.productQuantity){mapped[i]=d;used.add(i)}
+    }
+  }
+
+  for(let i=0;i<segments.length;i++){
+    if(mapped[i])continue;
+    const s=segments[i];
+    let pick=-1;
+    for(let j=0;j<domRows.length;j++){
+      if(used.has(j))continue;
+      const d=domRows[j];
+      if(d.itemPrice!==s.itemPrice||d.productQuantity!==s.productQuantity)continue;
+      const desc=clean(s.productLineText),domDesc=clean(d.productLineText);
+      if(desc===domDesc||desc.includes(domDesc)||domDesc.includes(desc)){pick=j;break}
+      if(pick<0)pick=j;
+    }
+    if(pick>=0){mapped[i]=domRows[pick];used.add(pick)}
+  }
+  return mapped;
+}
+
 function chooseKnownOrderRow(expectedId,segment,itemIndex,totalSegments){
   const rr=storedRowsForOrder(expectedId);
   if(!rr.length)return null;
@@ -398,52 +518,61 @@ function chooseKnownOrderRow(expectedId,segment,itemIndex,totalSegments){
   const samePrice=rr.filter(r=>clean(r.itemPrice)&&clean(r.itemPrice)===clean(segment.itemPrice));
   if(samePrice.length===1)return samePrice[0];
 
-  // Indexové párovanie je bezpečné len vtedy, keď počet URL z Orders presne sedí s počtom položiek Details.
   const urls=rr.filter(r=>r.productUrl);
   if(urls.length===totalSegments&&urls[itemIndex])return urls[itemIndex];
   return null;
 }
 
-function resolveDetailItem(segment,candidates,expectedId,itemIndex,totalSegments){
+function resolveDetailItem(segment,candidates,expectedId,itemIndex,totalSegments,domRow){
   const descriptor=segment.productLineText;
   const matches=candidates.filter(c=>descriptor.includes(c.title));
   let chosen=null;
-  if(matches.length){
-    matches.sort((a,b)=>b.score-a.score||b.title.length-a.title.length);
-    chosen=matches[0];
-  }
+  if(matches.length){matches.sort((a,b)=>b.score-a.score||b.title.length-a.title.length);chosen=matches[0]}
 
   const known=chooseKnownOrderRow(expectedId,segment,itemIndex,totalSegments);
-  let productTitle='',productVariant='',productUrl='';
+  let productTitle='',productVariant='',productUrl='',productTitleSource='',productVariantSource='';
 
-  if(chosen){
+  if(domRow){
+    const dt=clean(domRow.productTitle),dv=clean(domRow.productVariant);
+    if(dt&&(descriptor.includes(dt)||domRow.productLineText.includes(descriptor))){productTitle=dt;productTitleSource='details-dom-row'}
+    if(dv&&(descriptor===dv||descriptor.endsWith(' '+dv)||descriptor.includes(dv))){productVariant=dv;productVariantSource=domRow.productVariantSource||'details-dom-row'}
+    if(domRow.productUrl)productUrl=itemUrl(domRow.productUrl);
+  }
+
+  if(!productTitle&&chosen){
     productTitle=chosen.title;
-    productUrl=chosen.productUrl;
-  }else if(known&&clean(known.productTitle)&&descriptor.includes(clean(known.productTitle))){
+    productTitleSource='details-dom-title-anchor';
+    if(!productUrl)productUrl=chosen.productUrl;
+  }else if(!productTitle&&known&&clean(known.productTitle)&&descriptor.includes(clean(known.productTitle))){
     productTitle=clean(known.productTitle);
-    productUrl=itemUrl(known.productUrl||'');
-  }else if(known){
+    productTitleSource='orders-known-title';
+    if(!productUrl)productUrl=itemUrl(known.productUrl||'');
+  }else if(!productUrl&&known){
     productUrl=itemUrl(known.productUrl||'');
   }
 
-  if(productTitle){
+  if(!productVariant&&productTitle){
     const p=descriptor.indexOf(productTitle);
-    if(p>=0)productVariant=clean(descriptor.slice(p+productTitle.length));
+    if(p>=0){
+      const remainder=clean(descriptor.slice(p+productTitle.length));
+      if(remainder){productVariant=remainder;productVariantSource='descriptor-after-title'}
+    }
   }
 
-  // Ak DOM nedal jednoznačnú hranicu názov/variant, nič nehádame.
   const note=[];
   if(!productTitle)note.push('Názov/hranica názvu z Details nebola jednoznačná; celý text je v productLineText.');
-  if(!productVariant)note.push('Variant z Details nebol jednoznačne oddelený.');
+  if(!productVariant)note.push('Samostatný variant medzi názvom a cenou nebol nájdený alebo nebol jednoznačný.');
   if(!productUrl)note.push('Produktový URL nebolo možné bezpečne priradiť.');
 
   return{
     itemIndex:itemIndex+1,
     productUrl,
     productTitle,
+    productTitleSource,
     productVariant,
+    productVariantSource,
     productLineText:descriptor,
-    estimatedDeliveryDate:segment.estimatedDeliveryDate,
+    estimatedDeliveryDate:segment.estimatedDeliveryDate||domRow?.estimatedDeliveryDate||'',
     productQuantity:segment.productQuantity,
     itemPrice:segment.itemPrice,
     currency:segment.currency,
@@ -483,12 +612,14 @@ function parseDetailPage(expectedId,queueEntry){
   const segments=parseDetailTextSegments(cleanRaw,expectedId,sellerName);
   const region=detailRegion(cleanRaw,expectedId,sellerName);
   const candidates=detailDomTitleCandidates(region);
-  const items=segments.map((seg,i)=>resolveDetailItem(seg,candidates,expectedId,i,segments.length));
+  const domRows=mapDetailDomRows(segments);
+  const items=segments.map((seg,i)=>resolveDetailItem(seg,candidates,expectedId,i,segments.length,domRows[i]));
 
   const note=[];
   if(String(bodyId)!==String(expectedId))note.push(`Očakávané orderId ${expectedId}, stránka hlási ${bodyId}.`);
   if(!segments.length)note.push('V Details sa nenašla žiadna položka s väzbou cena × množstvo.');
-  if(items.some(x=>!x.productTitle))note.push('Pri niektorých položkách zostala hranica názov/variant neistá; productLineText je zachovaný bez domýšľania.');
+  if(items.some(x=>!x.productTitle))note.push('Pri niektorých položkách zostala hranica názvu neistá; productLineText je zachovaný bez domýšľania.');
+  if(items.some(x=>!x.productVariant))note.push('Niektoré položky nemajú samostatný variantový riadok alebo ho nebolo možné bezpečne potvrdiť.');
   if(queueEntry?.source&&/fallback/.test(queueEntry.source))note.push(`Detail URL bol vytvorený ako ${queueEntry.source}.`);
 
   const rec={
@@ -575,7 +706,7 @@ function btn(p,s,f,c,stop=false){const b=document.createElement('button');b.text
 function panel(){
   if(document.getElementById(PANEL)||!document.body)return;
   const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:320px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';
-  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details text parser v2</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
+  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details DOM variant v3</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
   btn(p,'1. Viacnásobne načítať + naskenovať',startMultiPass,'#238636');
   btn(p,'Zastaviť fázu 1',stopMulti,'#a66321',true);
   btn(p,'2. Načítať presné údaje z Details',startDetails,'#8250df');
@@ -586,7 +717,7 @@ function panel(){
   btn(p,'Kopírovať CSV',copy,'#0969da');
   btn(p,'Vymazať všetky uložené dáta',clearData,'#b62324');
   const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';
-  s.textContent=sessionStorage.getItem('AE_EXPORT_SK_2026_DETAILS_MIGRATED')?'v0.9.10 odstránila staré chybné Details z 0.9.9. Orders zostali zachované. Spusti fázu 2 nanovo.':'Fáza 2 číta položky z textu Details. Množstvo berie iba z ceny ×N. Osobné údaje ani platobná metóda sa neukladajú.';
+  s.textContent=sessionStorage.getItem('AE_EXPORT_SK_2026_DETAILS_MIGRATED')?'Nový parser variantov odstránil starú vrstvu Details. Orders zostali zachované. Spusti fázu 2 nanovo.':'Fáza 2 preferuje samostatný riadok medzi názvom produktu a cenou ako presný variant. Množstvo berie iba z ceny ×N.';
   p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none';
 }
 
