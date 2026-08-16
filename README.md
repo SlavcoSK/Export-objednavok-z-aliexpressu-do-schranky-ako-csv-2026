@@ -39,7 +39,26 @@ Každý produkt je uložený ako samostatný riadok. Export obsahuje najmä:
 3. Kliknite na **Raw**.
 4. Tampermonkey by mal ponúknuť inštaláciu userscriptu.
 5. Ak sa inštalačné okno neotvorí automaticky, vytvorte v Tampermonkey nový skript a vložte doň celý obsah súboru.
-6. Uložte skript.
+6. Uložte skript a skontrolujte, že je v Tampermonkey zapnutý.
+
+Priamy Raw odkaz:
+
+`https://raw.githubusercontent.com/SlavcoSK/Export-objedn-vok-z-aliexpressu-do-schr-nky-ako-csv-2026/main/aliexpress_orders_export.user.js`
+
+## Dôležité pre Chrome / Edge
+
+Pri novších verziách Chromium prehliadačov môže byť potrebné výslovne povoliť spúšťanie používateľských skriptov.
+
+Ak sa panel skriptu na AliExpress stránke nezobrazí:
+
+1. Otvorte `chrome://extensions/`.
+2. Nájdite **Tampermonkey** a kliknite na **Details / Podrobnosti**.
+3. Zapnite **Allow User Scripts / Povoliť používateľské skripty**.
+4. Skontrolujte **Site access / Prístup k stránkam** a povoľte aspoň `aliexpress.com`, prípadne **On all sites**.
+5. Ak prepínač **Allow User Scripts** nie je dostupný, skúste na stránke rozšírení zapnúť **Developer mode / Režim pre vývojárov**.
+6. Potom stránku AliExpressu obnovte cez `Ctrl+F5`.
+
+Ak skript beží správne, vpravo hore sa zobrazí panel **AliExpress export SK 2026** s tlačidlami na skenovanie a export.
 
 ## Použitie
 
@@ -78,6 +97,8 @@ Pre ďalšie spracovanie je vhodnejší **JSON export**, pretože zachová aj su
 
 AliExpress často mení HTML štruktúru stránky. Skript preto nepoužíva iba jeden pevný CSS selektor, ale snaží sa hľadať objednávky a produkty podľa odkazov a okolitého obsahu.
 
+Verzia **0.9.2** používa širšie pravidlá spúšťania pre doménu AliExpress, aby sa panel zobrazil aj pri zmenených URL objednávok.
+
 Napriek tomu sa môže stať, že po zmene stránky AliExpress bude potrebné parser upraviť.
 
 Niektoré staršie produktové odkazy môžu:
@@ -99,6 +120,6 @@ Skript sám neposiela objednávky na externý server.
 
 ## Verzia
 
-Aktuálna verzia userscriptu: **0.9.1**
+Aktuálna verzia userscriptu: **0.9.2**
 
 Projekt je určený hlavne na osobný export a následné spracovanie objednávok v Exceli.
