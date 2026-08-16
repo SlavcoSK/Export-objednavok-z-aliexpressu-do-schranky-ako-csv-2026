@@ -60,6 +60,10 @@ Ak sa panel skriptu na AliExpress stránke nezobrazí:
 
 Ak skript beží správne, vpravo hore sa zobrazí panel **AliExpress export SK 2026** s tlačidlami na skenovanie a export.
 
+### Vzhľad panela
+
+![Panel AliExpress export SK 2026](docs/aliexpress-export-panel.png)
+
 ## Použitie
 
 1. Prihláste sa do svojho účtu na AliExpress.
