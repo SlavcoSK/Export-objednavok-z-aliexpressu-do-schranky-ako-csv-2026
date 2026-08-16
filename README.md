@@ -10,6 +10,24 @@ Hlavný userscript:
 
 `aliexpress_orders_export.user.js`
 
+Priamy Raw odkaz:
+
+`https://raw.githubusercontent.com/SlavcoSK/Export-objedn-vok-z-aliexpressu-do-schr-nky-ako-csv-2026/main/aliexpress_orders_export.user.js`
+
+## Aktuálna verzia
+
+**0.9.5**
+
+Hlavné zmeny vo v0.9.5:
+
+- skenovanie objednávok po dávkach, aby sa znížilo riziko hlášky **Stránka nereaguje**,
+- priebežné zobrazenie postupu `Spracované X / Y`,
+- jednoduchší kľúč deduplikácie `orderId + productUrl`,
+- oprava variantu produktu, aby sa za variant nebrali položky ako `Date:`, `Completed`, `Expired`, `Ref. Number`, `Copy` alebo `Details`,
+- variant sa vyhodnocuje predovšetkým z textu medzi názvom produktu a cenou,
+- obrázok sa prijme iba vtedy, keď je jednoznačne naviazaný na produktový odkaz,
+- panel upozorní, ak je zistený Google Translator / preklad stránky.
+
 ## Čo skript exportuje
 
 Každý produkt je uložený ako samostatný riadok. Export obsahuje najmä:
@@ -37,17 +55,11 @@ Každý produkt je uložený ako samostatný riadok. Export obsahuje najmä:
 1. Nainštalujte rozšírenie **Tampermonkey** do Chrome, Edge alebo Firefoxu.
 2. Otvorte súbor `aliexpress_orders_export.user.js` v tomto repozitári.
 3. Kliknite na **Raw**.
-4. Tampermonkey by mal ponúknuť inštaláciu userscriptu.
+4. Tampermonkey by mal ponúknuť inštaláciu alebo aktualizáciu userscriptu.
 5. Ak sa inštalačné okno neotvorí automaticky, vytvorte v Tampermonkey nový skript a vložte doň celý obsah súboru.
 6. Uložte skript a skontrolujte, že je v Tampermonkey zapnutý.
 
-Priamy Raw odkaz:
-
-`https://raw.githubusercontent.com/SlavcoSK/Export-objedn-vok-z-aliexpressu-do-schr-nky-ako-csv-2026/main/aliexpress_orders_export.user.js`
-
 ## Dôležité pre Chrome / Edge
-
-Pri novších verziách Chromium prehliadačov môže byť potrebné výslovne povoliť spúšťanie používateľských skriptov.
 
 Ak sa panel skriptu na AliExpress stránke nezobrazí:
 
@@ -55,23 +67,51 @@ Ak sa panel skriptu na AliExpress stránke nezobrazí:
 2. Nájdite **Tampermonkey** a kliknite na **Details / Podrobnosti**.
 3. Zapnite **Allow User Scripts / Povoliť používateľské skripty**.
 4. Skontrolujte **Site access / Prístup k stránkam** a povoľte aspoň `aliexpress.com`, prípadne **On all sites**.
-5. Ak prepínač **Allow User Scripts** nie je dostupný, skúste na stránke rozšírení zapnúť **Developer mode / Režim pre vývojárov**.
+5. Ak prepínač **Allow User Scripts** nie je dostupný, skúste zapnúť **Developer mode / Režim pre vývojárov**.
 6. Potom stránku AliExpressu obnovte cez `Ctrl+F5`.
 
-Ak skript beží správne, vpravo hore sa zobrazí panel **AliExpress export SK 2026** s tlačidlami na skenovanie a export.
+Ak skript beží správne, vpravo hore sa zobrazí panel **AliExpress export SK 2026**.
 
 ### Vzhľad panela
 
 ![Panel AliExpress export SK 2026](docs/aliexpress-export-panel.png)
 
+## Google Translator / automatický preklad stránky
+
+**Pri skenovaní odporúčame Google Translator vypnúť.**
+
+Automatický preklad stránky môže meniť DOM a textové uzly AliExpressu počas skenovania. To môže spôsobiť:
+
+- nesprávne priradenie názvu alebo variantu,
+- miešanie jazykov v `rawOrderText`,
+- duplicitné záznamy,
+- výrazne vyššiu záťaž stránky,
+- hlášku Chrome **Stránka nereaguje**.
+
+Verzia **0.9.5** sa pokúsi zapnutý Translator rozpoznať. Ak ho zistí:
+
+- v paneli sa zobrazí červené upozornenie,
+- pred skenovaním sa zobrazí potvrdenie s odporúčaním Translator vypnúť,
+- skenovanie je možné zrušiť bez zmeny uložených údajov.
+
+Odporúčaný postup je:
+
+1. vypnúť Google Translator,
+2. obnoviť stránku `Ctrl+F5`,
+3. kliknúť **Vymazať uložené dáta**, ak ide o nový test,
+4. spustiť skenovanie,
+5. po dokončení exportovať JSON.
+
 ## Použitie
 
 1. Prihláste sa do svojho účtu na AliExpress.
-2. Otvorte **Účet → Objednávky**.
-3. Na pravej strane stránky sa zobrazí panel **AliExpress export SK 2026**.
-4. Kliknite na **Naskenovať túto stránku**.
-5. Pri nejasnej alebo viacpoložkovej objednávke môžete otvoriť jej **Detaily** a vykonať sken ešte raz.
-6. Údaje sa priebežne ukladajú do lokálneho úložiska prehliadača.
+2. Otvorte **Account → Orders**.
+3. Vypnite Google Translator / automatický preklad stránky.
+4. Na pravej strane stránky sa zobrazí panel **AliExpress export SK 2026**.
+5. Kliknite na **Naskenovať túto stránku**.
+6. Počas skenovania sa zobrazuje priebeh `Spracované X / Y`.
+7. Pri nejasnej alebo viacpoložkovej objednávke môžete otvoriť jej **Details** a vykonať sken ešte raz.
+8. Údaje sa priebežne ukladajú do lokálneho úložiska prehliadača.
 
 Panel obsahuje tieto možnosti:
 
@@ -81,31 +121,21 @@ Panel obsahuje tieto možnosti:
 - **Kopírovať CSV** – skopíruje CSV do schránky.
 - **Vymazať uložené dáta** – zmaže doteraz nazbierané údaje z lokálneho úložiska.
 
-## Odporúčaný postup
+## Odporúčaný postup testovania
 
-Najprv skript otestujte na jednej objednávke, ideálne cez stránku **Detaily**. Skontrolujte, či správne zachytil:
+Pri novej verzii skriptu:
 
-- číslo objednávky,
-- názov produktu,
-- variant,
-- množstvo,
-- cenu,
-- produktový odkaz,
-- URL obrázka.
-
-Až potom pokračujte cez väčšiu časť histórie objednávok.
-
-Pre ďalšie spracovanie je vhodnejší **JSON export**, pretože zachová aj surové textové údaje a poznámky parsera.
+1. aktualizujte userscript,
+2. obnovte AliExpress cez `Ctrl+F5`,
+3. overte verziu v paneli,
+4. vypnite Translator,
+5. kliknite **Vymazať uložené dáta**,
+6. spustite nový sken,
+7. exportujte **JSON** a skontrolujte najmä názov, variant, cenu a počet riadkov.
 
 ## Dôležité upozornenia
 
-AliExpress často mení HTML štruktúru stránky. Skript preto nepoužíva iba jeden pevný CSS selektor, ale snaží sa hľadať objednávky a produkty podľa odkazov a okolitého obsahu.
-
-Verzia **0.9.2** používa širšie pravidlá spúšťania pre doménu AliExpress, aby sa panel zobrazil aj pri zmenených URL objednávok.
-
-Napriek tomu sa môže stať, že po zmene stránky AliExpress bude potrebné parser upraviť.
-
-Niektoré staršie produktové odkazy môžu:
+AliExpress často mení HTML štruktúru stránky. Niektoré staršie produktové odkazy môžu:
 
 - smerovať na už neexistujúci produkt,
 - smerovať na zmenený listing,
@@ -114,6 +144,17 @@ Niektoré staršie produktové odkazy môžu:
 
 Preto skript zámerne **nedohaduje neisté údaje**. Ak údaj nie je jednoznačný, má zostať prázdny alebo označený v `parserNote` na ručnú kontrolu.
 
+## Výkon
+
+Verzia 0.9.5 spracúva objednávky po dávkach po 20 kusoch a medzi dávkami krátko uvoľní hlavné vlákno prehliadača. Tým sa má výrazne znížiť riziko hlášky **Stránka nereaguje**.
+
+Ak sa hláška napriek tomu objaví:
+
+- zvoľte **Čakať**,
+- skontrolujte, či je vypnutý Translator,
+- zatvorte zbytočné karty alebo náročné rozšírenia,
+- po skončení skenu exportujte JSON a porovnajte počet riadkov.
+
 ## Súkromie
 
 Skript beží lokálne vo vašom prehliadači na stránke AliExpressu. Nazbierané údaje sa ukladajú do `localStorage` prehliadača pod kľúčom:
@@ -121,9 +162,5 @@ Skript beží lokálne vo vašom prehliadači na stránke AliExpressu. Nazbieran
 `AE_EXPORT_SK_2026`
 
 Skript sám neposiela objednávky na externý server.
-
-## Verzia
-
-Aktuálna verzia userscriptu: **0.9.2**
 
 Projekt je určený hlavne na osobný export a následné spracovanie objednávok v Exceli.
