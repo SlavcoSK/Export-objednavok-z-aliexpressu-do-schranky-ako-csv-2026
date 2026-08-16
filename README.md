@@ -1,8 +1,12 @@
 # Export objednávok z AliExpressu do CSV/JSON (2026)
 
-Tampermonkey userscript na export objednávok z AliExpressu. Projekt je rozdelený do samostatných fáz, aby sa najprv získal čo najkompletnejší zoznam objednávok a až potom sa čítali presné údaje zo stránky **Details**.
+Tampermonkey userscript na získanie histórie objednávok z AliExpressu. Projekt je rozdelený na samostatné fázy:
 
-Skript je zámerne konzervatívny: ak si nie je istý názvom, variantom alebo iným údajom, radšej nechá hodnotu prázdnu a uloží surový text na neskoršiu kontrolu.
+1. načítanie čo najkompletnejšieho zoznamu **Orders**,
+2. postupné čítanie presných údajov zo stránky **Details**,
+3. obrázky budú riešené až v ďalšom kroku.
+
+Skript je zámerne konzervatívny. Ak nedokáže bezpečne oddeliť názov a variant alebo priradiť produktový URL, údaj radšej nechá prázdny a zachová bezpečný text položky na kontrolu.
 
 ## Hlavný userscript
 
@@ -14,40 +18,55 @@ Priamy Raw odkaz:
 
 ## Aktuálna verzia
 
-**0.9.9**
+**0.9.10**
 
-## Čo je nové vo v0.9.9
+## Čo je nové vo v0.9.10
 
-Verzia 0.9.9 pridáva samostatnú **fázu 2 – čítanie presných údajov zo stránky Details**.
+Verzia 0.9.10 opravuje parser stránky **Details** po prvom reálnom teste v0.9.9.
 
-Nové správanie:
+Hlavné zmeny:
 
-- fáza 1 zostáva zachovaná: viacnásobné načítanie zoznamu Orders cez `View orders`,
-- fáza 2 postupne otvára detail každej objednávky,
-- používa existujúcu prihlásenú session AliExpressu v prehliadači,
-- prihlasovacie meno ani heslo sa do skriptu neukladajú,
-- skript sa snaží použiť presný `href` tlačidla **Details** z aktuálnej stránky,
-- ak pri starších uložených údajoch presný `href` nie je dostupný, použije aktuálny `spm` z funkčného odkazu ako fallback,
-- medzi detailmi je približne **3 sekundy** pauza,
-- na vykreslenie jednej detailovej stránky čaká maximálne približne **15 sekúnd**,
-- stav fázy 2 sa ukladá do `localStorage`, takže po prerušení je možné pokračovať,
-- JSON export teraz obsahuje aj `detailState` a `details`,
-- obrázky sa v tejto fáze ešte zámerne neriešia; budú samostatná ďalšia fáza.
+- položky sa už nehľadajú iba podľa jedného konkrétneho DOM kontajnera,
+- parser najprv vyhľadá textové bloky položiek medzi detailmi objednávky a `Subtotal`,
+- za hranicu jednej položky považuje väzbu **cena + `xN`**,
+- množstvo sa číta iba z hodnoty bezprostredne za cenou, napr. `US $14.41 x1`,
+- čísla ako `100X`, `20X`, `100:1` alebo podobné údaje v názve produktu sa už nesmú zameniť za množstvo,
+- podporované sú aj zrušené objednávky, ktoré nemajú riadok `Estimated delivery date`,
+- pri každej položke sa zachováva `productLineText` – celý text názvu + variantu pred cenou,
+- ak DOM dovolí jednoznačne určiť názov produktu, zvyšok `productLineText` sa uloží ako variant,
+- ak hranicu názov/variant nemožno bezpečne určiť, skript ju nehádá,
+- `rawOrderDetailText` už neobsahuje celý text stránky,
+- meno/adresa príjemcu, telefón a platobná metóda sa do detailového exportu neukladajú,
+- staré Details údaje vytvorené parserom 0.9.9 sa pri prvom spustení 0.9.10 automaticky odstránia; **Orders údaje zostávajú zachované**,
+- pribudlo tlačidlo **Vymazať iba Details**.
 
-## Fáza 1 – kompletný zoznam objednávok
+## Dôležitá zmena oproti 0.9.9
+
+Parser 0.9.9 síce správne otváral jednotlivé stránky Details a čítal dátumy, subtotal a total, ale pri väčšine objednávok nevedel rozpoznať produktové bloky. Navyše pôvodný spôsob čítania množstva mohol napríklad `100X` v názve produktu považovať za 100 kusov.
+
+Verzia 0.9.10 preto oddelila:
+
+- rozpoznanie položiek z textu,
+- presné čítanie ceny a množstva,
+- rozdelenie názvu a variantu,
+- priradenie produktového URL.
+
+Ak je istá iba prvá časť, ostatné polia zostanú prázdne namiesto odhadu.
+
+## Fáza 1 – zoznam Orders
 
 AliExpress nemusí po opakovanom klikaní na **View orders** pri každom načítaní zobraziť rovnakú množinu historických objednávok. Preto skript používa viac priechodov.
 
 Aktuálne nastavenie:
 
 - maximálne **12 priechodov**,
-- skript skončí skôr po **2 po sebe idúcich priechodoch bez novej objednávky**,
-- po náraste počtu objednávok čaká približne **3 sekundy na ustálenie**,
-- po reloadnutí stránky čaká približne **3 sekundy**,
-- medzi priechodmi je približne **3 sekundy** pauza,
-- maximálny timeout po kliknutí na `View orders` zostáva 9 sekúnd, ale nejde o pevné čakanie; pri skoršom ustálení pokračuje skôr.
+- koniec po **2 po sebe idúcich priechodoch bez novej objednávky**,
+- približne **3 s** na ustálenie po pribudnutí objednávok,
+- približne **3 s** po reloadnutí stránky,
+- približne **3 s** medzi priechodmi,
+- maximálne **9 s** na reakciu po kliknutí na `View orders`; ide iba o horný timeout, nie vždy pevné čakanie.
 
-Objednávky z jednotlivých priechodov sa zlučujú podľa `orderId`. Už nájdená objednávka sa nestratí iba preto, že ju AliExpress v ďalšom priechode nezobrazí.
+Už zachytené `orderId` sa naprieč priechodmi zlučujú a nestratia sa, ak ich AliExpress v ďalšom priechode nezobrazí.
 
 ## Fáza 2 – presné údaje z Details
 
@@ -55,140 +74,147 @@ Po dokončení fázy 1 kliknite na:
 
 **2. Načítať presné údaje z Details**
 
-Skript vytvorí front všetkých známych `orderId` a potom postupne otvára stránky typu:
+Skript vytvorí front známych `orderId` a postupne otvára stránky:
 
 `https://www.aliexpress.com/p/order/detail.html?...&orderId=...`
 
-Pri každej objednávke čaká na vykreslenie obsahu a snaží sa uložiť:
+Používa existujúcu prihlásenú session AliExpressu. Meno ani heslo sa do userscriptu neukladajú.
 
-- číslo objednávky,
-- názov predajcu,
+Pri každej objednávke sa skript snaží získať:
+
+- `orderId`,
+- predajcu,
 - dátum vytvorenia objednávky,
 - dátum zaplatenia,
 - dátum dokončenia zásielky,
 - dátum dokončenia objednávky,
-- subtotal,
-- výsledný total,
+- `Subtotal`,
+- `Total`,
 - menu,
-- jednotlivé produktové riadky,
-- názov konkrétnej položky,
-- variant/model,
-- množstvo `xN`,
-- cenu položky,
-- priamy odkaz na produkt,
-- surový text detailu na kontrolu.
+- počet jednotlivých položiek.
 
-### Dôležité súkromie
+Pri každej detailnej položke sa ukladajú najmä:
 
-Fáza 2 **neukladá prihlasovacie údaje**. Skript používa session, v ktorej je používateľ už prihlásený na AliExpress.
+- `itemIndex`,
+- `productLineText` – celý text produktu pred cenou,
+- `productTitle` – iba ak sa dá jednoznačne určiť,
+- `productVariant` – zvyšok za jednoznačným názvom,
+- `estimatedDeliveryDate`, ak existuje,
+- `productQuantity` z presného `xN` pri cene,
+- `itemPrice`,
+- `currency`,
+- `productUrl`, iba ak ho možno bezpečne priradiť,
+- `rawItemText` – bezpečný text konkrétnej položky,
+- `parserNote`.
 
-Zámerne sa tiež neukladajú údaje, ktoré pre databázu zakúpených dielov nepotrebujeme:
+### Príklad pravidla pre množstvo
 
-- meno a doručovacia adresa,
+Text:
+
+`... Oscilloscope Probe 100:1 100X ... US $14.41x1`
+
+sa musí interpretovať ako:
+
+- vlastnosť produktu: `100:1`, `100X`,
+- cena: `14.41`,
+- objednané množstvo: **1**.
+
+Množstvo sa teda nečíta z názvu, ale iba z `x1` bezprostredne za cenou.
+
+## Zrušené objednávky
+
+Niektoré zrušené objednávky nemajú `Estimated delivery date`. V takom prípade parser začne produktovú časť až za známym názvom predajcu z vrstvy Orders a skončí pred `Subtotal`.
+
+Ak ani tak nemožno bezpečne určiť produktovú časť, skript nič nedohaduje.
+
+## Súkromie
+
+Fáza Details zámerne neukladá:
+
+- meno príjemcu,
+- doručovaciu adresu,
 - telefónne číslo,
-- platobná metóda.
+- platobnú metódu,
+- prihlasovacie údaje.
 
-## Ako fungujú odkazy Details
+`rawOrderDetailText` vo v0.9.10 už nie je celý text stránky. Je zostavený iba z bezpečných údajov potrebných pre databázu objednávok: číslo objednávky, dátumy, predajca, text položiek, subtotal a total.
 
-Pri novom skenovaní skript preferuje presný `href` tlačidla **Details** z DOM stránky Orders.
+Pri aktualizácii z 0.9.9 sa staré detailové dáta automaticky odstránia práve preto, že starý formát mohol obsahovať celý text stránky. **Vrstva Orders sa pritom nemaže.**
 
-Ak je napríklad odkaz v prehliadači v tvare:
+## Odkazy Details
+
+Skript preferuje presný `href` tlačidla **Details** z DOM stránky Orders.
+
+Ak je dostupný napríklad:
 
 `https://www.aliexpress.com/p/order/detail.html?spm=...&orderId=3073820008318237`
 
-uloží sa celý odkaz vrátane `spm`.
+použije sa celý odkaz.
 
-Pri už existujúcich dátach z verzie 0.9.8 môžu byť niektoré uložené odkazy zjednodušené iba na `?orderId=...`. Preto fáza 2 pri spustení prečíta aktuálne funkčné odkazy z otvorenej stránky Orders a ich `spm` použije ako fallback aj pre objednávky, ktoré práve nie sú v DOM.
-
-Ak sa niektorý detail nepodarí načítať do časového limitu, skript ho zapíše do zoznamu `errors` a pokračuje ďalšou objednávkou.
+Ak presný odkaz pre staršiu objednávku nie je momentálne v DOM, skript môže použiť uložený detailový URL alebo fallback podľa `orderId`. Pri takom zázname sa zdroj odkazu uvedie v `detailUrlSource` a prípadne v `parserNote`.
 
 ## Obnova po prerušení
 
-Stav čítania Details sa ukladá do:
+Stav fázy 2 sa priebežne ukladá do `localStorage`.
 
-`AE_EXPORT_SK_2026_DETAIL_STATE`
+Ak sa počítač vypne alebo Chrome zavrie, rozpracovaný beh v0.9.10 je možné po návrate obnoviť od poslednej nespracovanej objednávky.
 
-Samotné načítané detaily sa ukladajú do:
+Medzi jednotlivými detailmi je približne **3 s** pauza a na načítanie jednej detailovej stránky sa čaká maximálne približne **15 s**.
 
-`AE_EXPORT_SK_2026_DETAILS`
+## Ako spustiť nový test v0.9.10
 
-Ak sa prehliadač zavrie alebo sa počítač vypne, stav zostáva v `localStorage`. Pri ďalšom spustení je možné pokračovať od poslednej nespracovanej objednávky.
-
-## Export JSON
-
-Tlačidlo:
-
-**Export JSON (Orders + Details)**
-
-exportuje naraz:
-
-- `multiPass` – stav a históriu fázy 1,
-- `detailState` – stav a históriu fázy 2,
-- `details` – presné údaje načítané z jednotlivých detailov objednávok,
-- `rows` – pôvodné produktové riadky získané zo stránky Orders.
-
-Tým sa pôvodné údaje z Orders neprepisujú detailovými údajmi. Obe vrstvy zostávajú oddelené, aby sa dali porovnať.
-
-## Obrázky
-
-Obrázková logika z hlavnej stránky Orders zostáva zatiaľ bez ďalších zmien.
-
-V **0.9.9 sa obrázky zo stránky Details ešte neukladajú do finálneho výsledku**. Najprv overíme správnosť čítania názvov, variantov, množstiev, cien a počtu položiek. Až potom bude nasledovať samostatná fáza pre obrázky zakúpených dielov a súčiastok.
-
-## Google Translator
-
-Pri práci skriptu odporúčame Google Translator vypnúť.
-
-Preklad stránky môže meniť DOM a textové uzly počas čítania, čo môže spôsobiť nesprávne priradenie názvov, variantov alebo stavov.
-
-Ak skript Translator rozpozná, zobrazí upozornenie.
-
-## Použitie
-
-1. Prihláste sa na AliExpress.
-2. Otvorte **Account → Orders**.
+1. Aktualizujte userscript cez **Raw**.
+2. Overte v paneli verziu **0.9.10**.
 3. Vypnite Google Translator.
-4. Aktualizujte userscript na **0.9.9**.
-5. Ak už máte úspešne dokončenú fázu 1 a uložených 437 objednávok, nemusíte ju povinne spúšťať znova.
-6. Kliknite **2. Načítať presné údaje z Details**.
-7. Nechajte kartu otvorenú. Skript bude postupne prechádzať medzi detailmi jednotlivých objednávok.
-8. Panel ukazuje počet načítaných detailov a celkový počet detailných položiek.
-9. Po skončení použite **Export JSON (Orders + Details)**.
-10. Výsledný JSON je vhodný poslať na kontrolu pred ďalšou fázou s obrázkami.
+4. Otvorte hlavnú stránku **Account → Orders**.
+5. Ak už máte dokončenú fázu 1, **nespúšťajte ju znovu iba kvôli 0.9.10**.
+6. Staré Details z 0.9.9 sa po aktualizácii odstránia automaticky; Orders zostanú.
+7. Kliknite **2. Načítať presné údaje z Details**.
+8. Na prvý test nechajte spracovať približne 5–10 objednávok.
+9. Kliknite **Zastaviť Details**.
+10. Použite **Export JSON (Orders + Details)** a skontrolujte výsledok.
+11. Až po overení malej vzorky nechajte skript prejsť celý zoznam objednávok.
 
 ## Ovládacie tlačidlá
 
-- **1. Viacnásobne načítať + naskenovať** – fáza 1, načítanie čo najkompletnejšieho zoznamu Orders.
-- **Zastaviť fázu 1** – zastaví ďalšie priechody fázy 1.
-- **2. Načítať presné údaje z Details** – fáza 2, otvorí a číta jednotlivé detaily objednávok.
-- **Zastaviť Details** – zastaví fázu 2 bez vymazania už načítaných detailov.
-- **3. Export CSV (Orders)** – exportuje pôvodné riadky zo stránky Orders.
-- **Export JSON (Orders + Details)** – odporúčaný export s oboma vrstvami dát.
+- **1. Viacnásobne načítať + naskenovať** – fáza 1.
+- **Zastaviť fázu 1** – zastaví ďalšie priechody Orders.
+- **2. Načítať presné údaje z Details** – fáza 2.
+- **Zastaviť Details** – zastaví fázu 2 bez vymazania už správne načítaných detailov.
+- **Vymazať iba Details** – zmaže iba detailovú vrstvu a jej stav; Orders zostanú zachované.
+- **3. Export CSV (Orders)** – export vrstvy Orders.
+- **Export JSON (Orders + Details)** – odporúčaný kontrolný export.
 - **Kopírovať CSV** – skopíruje CSV do schránky.
-- **Vymazať všetky uložené dáta** – zmaže Orders, multi-pass stav aj všetky Details údaje.
+- **Vymazať všetky uložené dáta** – zmaže Orders aj Details; používajte len zámerne.
+
+## Obrázky
+
+Obrázky zatiaľ nie sú cieľom fázy 2. Najprv sa overuje správnosť:
+
+- počtu položiek,
+- názvu/produktového riadku,
+- variantu,
+- množstva,
+- ceny,
+- dátumov a subtotal/total.
+
+Až po stabilizovaní týchto údajov bude nasledovať samostatný krok na obrázky zakúpených dielov a súčiastok.
+
+## Google Translator
+
+Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť text a DOM stránky počas čítania a tým zhoršiť presnosť parsera.
 
 ## Inštalácia / aktualizácia
 
 1. Otvorte `aliexpress_orders_export.user.js` v GitHub repozitári.
 2. Kliknite **Raw**.
-3. Tampermonkey ponúkne inštaláciu alebo aktualizáciu.
+3. Tampermonkey ponúkne aktualizáciu existujúceho skriptu.
 4. Uložte skript.
-5. Obnovte stránku AliExpress cez `Ctrl+F5`.
-6. V paneli skontrolujte verziu **0.9.9**.
-
-## Chrome / Edge
-
-Ak sa panel nezobrazí:
-
-1. otvorte `chrome://extensions/`,
-2. otvorte podrobnosti Tampermonkey,
-3. povoľte používateľské skripty,
-4. povoľte prístup k `aliexpress.com`,
-5. podľa potreby zapnite Developer mode,
-6. obnovte AliExpress cez `Ctrl+F5`.
+5. Obnovte AliExpress cez `Ctrl+F5`.
+6. Skontrolujte, že panel ukazuje **v0.9.10 – Details text parser v2**.
 
 ## Poznámka k presnosti
 
-AliExpress často mení HTML štruktúru. Verzia 0.9.9 je prvá testovacia verzia parsera stránky Details. Preto je dôležité po prvom behu skontrolovať exportovaný JSON a porovnať niekoľko objednávok s tým, čo je viditeľné priamo na stránke Details.
+AliExpress často mení HTML a správanie stránky. Preto parser používa kombináciu textových údajov, údajov z DOM a už bezpečne uložených údajov z vrstvy Orders.
 
-Neisté údaje sa nemajú domýšľať. Ak parser údaj nedokáže jednoznačne priradiť, má ho nechať prázdny alebo uviesť poznámku v `parserNote`.
+Ak si nie je istý hranicou názov/variant alebo URL produktu, hodnotu nemá domýšľať. Celý text položky zostane v `productLineText` a neistota sa uvedie v `parserNote`.
