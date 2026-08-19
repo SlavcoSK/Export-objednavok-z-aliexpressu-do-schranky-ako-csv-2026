@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AliExpress objednávky -> CSV/JSON + Details
 // @namespace    SlavcoSK
-// @version      0.9.11
-// @description  Viacnásobný export objednávok AliExpress + presný parser Details. Variant má prioritu zo samostatného riadku medzi názvom a cenou.
+// @version      0.9.12
+// @description  Export AliExpress Orders + presné Details + konzervatívne obrázky z rovnakého produktového bloku v Details.
 // @match        *://*.aliexpress.com/*
 // @match        *://aliexpress.com/*
 // @match        *://*.aliexpress.us/*
@@ -13,26 +13,33 @@
 (() => {
 'use strict';
 
-const VERSION='0.9.11';
+const VERSION='0.9.12';
+// Details parser nemeníme: už overených 437 Details zostáva zachovaných.
 const DETAIL_PARSER_VERSION='0.9.11-dom-variant-v3';
+const IMAGE_PARSER_VERSION='0.9.12-details-image-v1';
 const KEY='AE_EXPORT_SK_2026';
 const MULTI_KEY='AE_EXPORT_SK_2026_MULTI';
 const DETAIL_KEY='AE_EXPORT_SK_2026_DETAILS';
 const DETAIL_STATE_KEY='AE_EXPORT_SK_2026_DETAIL_STATE';
+const IMAGE_KEY='AE_EXPORT_SK_2026_IMAGES';
+const IMAGE_STATE_KEY='AE_EXPORT_SK_2026_IMAGE_STATE';
 const PANEL='ae-export-sk-panel', SEP=';';
 
 const BATCH_SIZE=20, BATCH_DELAY=80;
 const VIEW_WAIT_MS=9000, VIEW_SETTLE_MS=3000, VIEW_BETWEEN_CLICKS_MS=1600, VIEW_MAX_CLICKS=120;
 const MULTI_MAX_PASSES=12, MULTI_STABLE_REQUIRED=2, PASS_START_DELAY_MS=3000, PASS_RELOAD_DELAY_MS=3000;
 const DETAIL_PAGE_WAIT_MS=15000, DETAIL_PAGE_SETTLE_MS=1800, DETAIL_BETWEEN_MS=3000;
+const IMAGE_PAGE_SETTLE_MS=900, IMAGE_ROW_SCROLL_WAIT_MS=180, IMAGE_BETWEEN_MS=2500;
 
 const HEAD=['orderId','orderDate','status','seller','productTitle','productVariant','productQuantity','itemPrice','currency','orderTotal','productUrl','imageUrl','detailUrl','sourceUrl','rawProductText','rawOrderText','parserNote'];
 const GENERIC_TITLE=/^(obrázok názvu|image title|image|picture|photo|product image)$/i;
 const BAD_IMAGE=/Se39935ad4d904c8b9abf60a4b71fa315F\.png|6000000002182-2-tps-48-48\.png|Se5bee6b872c34652909ace14ca3d6ab50|\/272x80\.png(?:\?|$)/i;
+const IMAGE_UI_HINT=/(?:logo|avatar|icon|sprite|flag|coupon|badge|choice|seller|store-logo|payment|visa|mastercard|shipping-icon|delivery-icon|arrow|star|qrcode|qr-code)/i;
 const META_LINE=/^(completed|finished|expired|cancelled|canceled|awaiting delivery|processing|shipped|closed|dokončené|platnosť vypršala|zrušené|čaká sa na doručenie|date\s*:|dátum\s*:|ref\.?\s*number\s*:|referenčné číslo\s*:|copy$|kopírovať$|details?$|detaily$)/i;
 
 let multiRunningNow=false;
 let detailRunningNow=false;
+let imageRunningNow=false;
 
 console.log(`[AE Export SK] v${VERSION} spustený`, location.href);
 
@@ -51,12 +58,22 @@ const saveMulti=s=>localStorage.setItem(MULTI_KEY,JSON.stringify(s));
 const detailOrders=()=>{try{return JSON.parse(localStorage.getItem(DETAIL_KEY)||'[]')}catch{return[]}};
 const detailState=()=>{try{return JSON.parse(localStorage.getItem(DETAIL_STATE_KEY)||'null')}catch{return null}};
 const saveDetailState=s=>{localStorage.setItem(DETAIL_STATE_KEY,JSON.stringify(s));count()};
+const imageOrders=()=>{try{return JSON.parse(localStorage.getItem(IMAGE_KEY)||'[]')}catch{return[]}};
+const imageState=()=>{try{return JSON.parse(localStorage.getItem(IMAGE_STATE_KEY)||'null')}catch{return null}};
+const saveImageState=s=>{localStorage.setItem(IMAGE_STATE_KEY,JSON.stringify(s));count()};
 
 function saveDetailOrder(rec){
   const a=detailOrders();
   const i=a.findIndex(x=>String(x.orderId)===String(rec.orderId));
   if(i>=0)a[i]=rec;else a.push(rec);
   localStorage.setItem(DETAIL_KEY,JSON.stringify(a));
+  count();
+}
+function saveImageOrder(rec){
+  const a=imageOrders();
+  const i=a.findIndex(x=>String(x.orderId)===String(rec.orderId));
+  if(i>=0)a[i]=rec;else a.push(rec);
+  localStorage.setItem(IMAGE_KEY,JSON.stringify(a));
   count();
 }
 
@@ -66,15 +83,29 @@ function resetDetailsOnly(silent=false){
   count();
   if(!silent)setStatus('Údaje fázy Details boli vymazané. Orders a 1. fáza zostali zachované.');
 }
+function resetImagesOnly(silent=false){
+  localStorage.removeItem(IMAGE_KEY);
+  localStorage.removeItem(IMAGE_STATE_KEY);
+  count();
+  if(!silent)setStatus('Vymazaná bola iba vrstva obrázkov. Orders ani Details sa nezmenili.');
+}
 
 function migrateOldDetails(){
   const st=detailState(),d=detailOrders();
   const oldState=st&&st.parserVersion!==DETAIL_PARSER_VERSION;
   const oldRecords=d.some(x=>x?.parserVersion!==DETAIL_PARSER_VERSION);
   if(oldState||oldRecords){
-    // Nová verzia parsera musí prečítať Details nanovo. Vrstva Orders sa nemení.
     resetDetailsOnly(true);
     sessionStorage.setItem('AE_EXPORT_SK_2026_DETAILS_MIGRATED','1');
+  }
+}
+function migrateOldImages(){
+  const st=imageState(),d=imageOrders();
+  const oldState=st&&st.parserVersion!==IMAGE_PARSER_VERSION;
+  const oldRecords=d.some(x=>x?.parserVersion!==IMAGE_PARSER_VERSION);
+  if(oldState||oldRecords){
+    resetImagesOnly(true);
+    sessionStorage.setItem('AE_EXPORT_SK_2026_IMAGES_MIGRATED','1');
   }
 }
 
@@ -240,6 +271,7 @@ function uniqueKnownOrderIds(){const st=multiState();if(st?.knownOrderIds?.lengt
 function isDetailPage(){return /\/p\/order\/detail\.html/i.test(location.pathname)}
 function storedRowsForOrder(id){return rows().filter(r=>String(r.orderId)===String(id))}
 function storedSeller(id){return storedRowsForOrder(id).map(r=>clean(r.seller)).find(Boolean)||''}
+function storedDetailOrder(id){return detailOrders().find(r=>String(r.orderId)===String(id))||null}
 
 async function startDetails(){
   if(isDetailPage()){setStatus('Fázu 2 spusti z hlavnej stránky Orders, aby sa zachytili odkazy Details.',true);return}
@@ -251,6 +283,7 @@ async function startDetails(){
   }
 
   resetDetailsOnly(true);
+  resetImagesOnly(true);
   const ids=uniqueKnownOrderIds();if(!ids.length){setStatus('Nemám zoznam orderId. Najprv dokonči fázu 1.',true);return}
   const domMap=detailLinkMap(),spm=firstCurrentSpm(domMap);
   const queue=ids.map(id=>({orderId:id,...buildDetailUrl(id,domMap,spm)}));
@@ -680,23 +713,242 @@ async function finishDetails(st){
   if(st.returnUrl&&location.href!==st.returnUrl){await sleep(2500);location.href=st.returnUrl}
 }
 
+// ---------------- FÁZA 3: OBRÁZKY Z DETAILS 0.9.12 ----------------
+function imageUrlCandidates(img){
+  if(!img)return[];
+  const out=[],seen=new Set();
+  const add=(u,source,bonus=0)=>{
+    u=abs(u);
+    if(!u||seen.has(u)||BAD_IMAGE.test(u)||/^(?:data|blob):/i.test(u)||/\.(?:svg|gif)(?:[?#]|$)/i.test(u))return;
+    seen.add(u);out.push({url:u,source,bonus});
+  };
+  for(const [k,b] of [['data-src',3],['data-original',3],['data-lazy-src',3],['data-image',2],['src',0]])add(img.getAttribute?.(k),k,b);
+  add(img.currentSrc,'currentSrc',1);
+  const ss=img.getAttribute?.('srcset');
+  if(ss)for(const p of ss.split(',')){const u=p.trim().split(/\s+/)[0];if(u)add(u,'srcset',1)}
+  return out;
+}
+function imageFamily(u){
+  try{const x=new URL(u);x.search='';x.hash='';return x.href.replace(/^http:/,'https:')}catch{return String(u||'').split(/[?#]/)[0]}
+}
+function titleOverlap(img,title){
+  const alt=clean(img.getAttribute('alt')||img.getAttribute('title')||'');
+  if(!alt||!title)return 0;
+  const t=new Set(titleTokens(title)),a=titleTokens(alt);let n=0;
+  for(const x of a)if(t.has(x))n++;
+  return n;
+}
+function imageElementCandidate(img,item){
+  const urls=imageUrlCandidates(img);if(!urls.length)return null;
+  const rect=img.getBoundingClientRect?.()||{width:0,height:0};
+  const w=Number(img.naturalWidth||img.getAttribute?.('width')||img.width||rect.width||0);
+  const h=Number(img.naturalHeight||img.getAttribute?.('height')||img.height||rect.height||0);
+  if(w&&h){const ratio=Math.max(w/h,h/w);if(w<42||h<42||ratio>3.0)return null}
+
+  const hint=clean(`${img.className||''} ${img.id||''} ${img.getAttribute?.('alt')||''} ${img.getAttribute?.('title')||''}`);
+  const closestItem=img.closest?.('a[href*="/item/"]');
+  const sameProductLink=!!(closestItem&&itemUrl(closestItem.href)===itemUrl(item.productUrl||''));
+  const overlap=titleOverlap(img,item.productTitle||'');
+
+  let base=0;
+  if(sameProductLink)base+=10;
+  if(w>=70&&h>=70)base+=3;
+  if(w>=120&&h>=120)base+=2;
+  if(overlap>=2)base+=4;else if(overlap===1)base+=2;
+  if(IMAGE_UI_HINT.test(hint))base-=9;
+
+  let best=null;
+  for(const u of urls){
+    let score=base+u.bonus;
+    if(/(?:alicdn\.com|aliexpress-media\.com)/i.test(u.url))score+=3;
+    if(/\/kf\//i.test(u.url))score+=3;
+    if(IMAGE_UI_HINT.test(u.url))score-=7;
+    const cur={url:u.url,urlSource:u.source,score,width:w||'',height:h||'',sameProductLink,overlap};
+    if(!best||cur.score>best.score)best=cur;
+  }
+  return best;
+}
+function chooseDetailImage(block,item){
+  if(!block)return{status:'unmapped-item-block',url:'',source:'',candidateCount:0,candidates:[],note:'Produktový blok v aktuálnom Details DOM sa nepodarilo bezpečne priradiť.'};
+  const byFamily=new Map();
+  for(const img of block.querySelectorAll('img')){
+    const c=imageElementCandidate(img,item);if(!c)continue;
+    const fam=imageFamily(c.url),old=byFamily.get(fam);
+    if(!old||c.score>old.score)byFamily.set(fam,c);
+  }
+  const cands=[...byFamily.values()].sort((a,b)=>b.score-a.score);
+  const publicCands=cands.slice(0,3).map(c=>({url:c.url,score:c.score,width:c.width,height:c.height}));
+  if(!cands.length)return{status:'not-found',url:'',source:'',candidateCount:0,candidates:[],note:'V tom istom produktovom bloku nebol nájdený použiteľný obrázok.'};
+  const top=cands[0],second=cands[1];
+  if(top.score<10)return{status:'ambiguous',url:'',source:'',candidateCount:cands.length,candidates:publicCands,note:`Najlepší kandidát má nízke skóre ${top.score}; obrázok sa neukladá.`};
+  if(second&&top.score-second.score<3)return{status:'ambiguous',url:'',source:'',candidateCount:cands.length,candidates:publicCands,note:`Dva rozdielne obrázky majú podobné skóre ${top.score}/${second.score}; nič sa nehádalo.`};
+  return{status:'ok',url:top.url,source:'details-same-item-block',candidateCount:cands.length,candidates:publicCands,note:'',score:top.score,width:top.width,height:top.height,urlSource:top.urlSource};
+}
+function domRowMatchScore(d,item){
+  if(!d||!item)return-999;
+  if(clean(d.itemPrice)!==clean(item.itemPrice)||clean(d.productQuantity)!==clean(item.productQuantity))return-999;
+  let s=0;
+  const du=itemUrl(d.productUrl||''),iu=itemUrl(item.productUrl||'');
+  if(du&&iu&&du===iu)s+=7;
+  const dt=clean(d.productTitle),it=clean(item.productTitle);
+  if(dt&&it&&(dt===it||dt.includes(it)||it.includes(dt)))s+=5;
+  const dv=clean(d.productVariant),iv=clean(item.productVariant);
+  if(iv&&dv&&(dv===iv||dv.includes(iv)||iv.includes(dv)))s+=6;
+  else if(!iv&&!dv)s+=1;
+  return s;
+}
+function mapStoredItemsToDomRows(orderRec){
+  const items=orderRec?.items||[],domRows=detailDomItemRows(),mapped=Array(items.length).fill(null),used=new Set();
+
+  if(domRows.length===items.length){
+    let safe=true;
+    for(let i=0;i<items.length;i++)if(domRowMatchScore(domRows[i],items[i])<5){safe=false;break}
+    if(safe){for(let i=0;i<items.length;i++){mapped[i]=domRows[i];used.add(i)}return{mapped,domRows}}
+  }
+
+  for(let i=0;i<items.length;i++){
+    const scored=[];
+    for(let j=0;j<domRows.length;j++){
+      if(used.has(j))continue;
+      const score=domRowMatchScore(domRows[j],items[i]);
+      if(score>-999)scored.push({j,score});
+    }
+    scored.sort((a,b)=>b.score-a.score);
+    const top=scored[0],second=scored[1];
+    if(top&&top.score>=7&&(!second||top.score-second.score>=3)){mapped[i]=domRows[top.j];used.add(top.j)}
+  }
+  return{mapped,domRows};
+}
+async function wakeImageRows(mapped){
+  const seen=new Set();
+  for(const r of mapped){
+    if(!r?.node||seen.has(r.node))continue;
+    seen.add(r.node);
+    try{r.node.scrollIntoView({block:'center',behavior:'auto'})}catch{}
+    await sleep(IMAGE_ROW_SCROLL_WAIT_MS);
+  }
+  await sleep(IMAGE_PAGE_SETTLE_MS);
+}
+async function parseImagesPage(orderRec,queueEntry){
+  const {mapped,domRows}=mapStoredItemsToDomRows(orderRec);
+  await wakeImageRows(mapped);
+  const items=(orderRec.items||[]).map((item,i)=>{
+    const img=chooseDetailImage(mapped[i]?.node||null,item);
+    return{
+      itemIndex:item.itemIndex||i+1,
+      productUrl:item.productUrl||'',
+      productTitle:item.productTitle||'',
+      productVariant:item.productVariant||'',
+      itemPrice:item.itemPrice||'',
+      productQuantity:item.productQuantity||'',
+      detailImageUrl:img.url||'',
+      detailImageSource:img.source||'',
+      detailImageStatus:img.status,
+      detailImageScore:img.score??'',
+      detailImageWidth:img.width??'',
+      detailImageHeight:img.height??'',
+      detailImageUrlSource:img.urlSource||'',
+      detailImageCandidateCount:img.candidateCount||0,
+      detailImageCandidates:img.candidates||[],
+      detailImageNote:img.note||''
+    };
+  });
+  const counts={ok:0,notFound:0,ambiguous:0,unmapped:0};
+  for(const x of items){if(x.detailImageStatus==='ok')counts.ok++;else if(x.detailImageStatus==='not-found')counts.notFound++;else if(x.detailImageStatus==='ambiguous')counts.ambiguous++;else counts.unmapped++}
+  return{
+    parserVersion:IMAGE_PARSER_VERSION,
+    orderId:String(orderRec.orderId),
+    detailUrl:location.href,
+    detailUrlSource:queueEntry?.source||'',
+    parsedAt:new Date().toISOString(),
+    expectedItems:(orderRec.items||[]).length,
+    domItemRows:domRows.length,
+    counts,
+    items
+  };
+}
+
+async function startImages(){
+  if(isDetailPage()){setStatus('Fázu 3 spusti z hlavnej stránky Orders. Hotové Details zostanú zachované.',true);return}
+  if(!translatorOkay()){setStatus('Čítanie obrázkov zrušené.',true);return}
+  const d=detailOrders();
+  if(!d.length){setStatus('Chýba vrstva Details. Najprv musí byť hotová fáza 2.',true);return}
+
+  const old=imageState();
+  if(old?.parserVersion===IMAGE_PARSER_VERSION&&!old.running&&old.queue?.length&&Number(old.index||0)<old.queue.length){
+    if(confirm(`Existuje rozpracovaná fáza obrázkov: ${old.index||0} / ${old.queue.length}. Pokračovať?`)){old.running=true;old.resumedAt=new Date().toISOString();saveImageState(old);continueImages();return}
+  }
+
+  resetImagesOnly(true);
+  const usable=d.filter(x=>Array.isArray(x.items)&&x.items.length>0);
+  if(!usable.length){setStatus('V Details nie sú žiadne produktové položky vhodné pre obrázky.',true);return}
+  const skipped=d.filter(x=>!Array.isArray(x.items)||x.items.length===0).map(x=>String(x.orderId));
+  const queue=usable.map(x=>({orderId:String(x.orderId),url:x.detailUrl||`https://www.aliexpress.com/p/order/detail.html?orderId=${encodeURIComponent(x.orderId)}`,source:x.detailUrl?'details-stored-url':'direct-fallback',expectedItems:x.items.length}));
+  const st={parserVersion:IMAGE_PARSER_VERSION,running:true,index:0,total:queue.length,queue,completedOrderIds:[],skippedNoDetailItems:skipped,errors:[],history:[],returnUrl:location.href,startedAt:new Date().toISOString()};
+  saveImageState(st);setStatus(`Fáza 3: začínam ${queue.length} objednávok s produktovými položkami. ${skipped.length} historických bez položiek preskakujem.`);await sleep(1000);continueImages();
+}
+
+async function continueImages(){
+  if(imageRunningNow)return;
+  const st=imageState();
+  if(!st?.running||st.parserVersion!==IMAGE_PARSER_VERSION)return;
+  imageRunningNow=true;setBusy(true);
+  try{
+    const idx=Number(st.index||0);
+    if(idx>=st.queue.length){await finishImages(st);return}
+    const entry=st.queue[idx];
+    if(!isDetailPage()||oid(location.href)!==String(entry.orderId)){
+      setStatus(`Fáza 3: otváram Details pre obrázky ${idx+1} / ${st.queue.length}, orderId ${entry.orderId}.`);location.href=entry.url;return;
+    }
+    setStatus(`Fáza 3: čakám na DOM ${idx+1} / ${st.queue.length}, orderId ${entry.orderId}.`);
+    const ready=await waitForDetailReady(entry.orderId);
+    if(!ready){
+      st.errors=Array.isArray(st.errors)?st.errors:[];st.errors.push({orderId:entry.orderId,url:location.href,error:'Timeout pri načítaní Details pre obrázky.',at:new Date().toISOString()});
+      st.history=Array.isArray(st.history)?st.history:[];st.history.push({index:idx+1,orderId:entry.orderId,ok:false,imagesOk:0,at:new Date().toISOString()});st.index=idx+1;saveImageState(st);
+    }else{
+      const orderRec=storedDetailOrder(entry.orderId);
+      if(!orderRec?.items?.length){
+        st.errors=Array.isArray(st.errors)?st.errors:[];st.errors.push({orderId:entry.orderId,url:location.href,error:'Uložený Detail záznam už nemá položky.',at:new Date().toISOString()});
+        st.history=Array.isArray(st.history)?st.history:[];st.history.push({index:idx+1,orderId:entry.orderId,ok:false,imagesOk:0,at:new Date().toISOString()});st.index=idx+1;saveImageState(st);
+      }else{
+        const rec=await parseImagesPage(orderRec,entry);saveImageOrder(rec);
+        st.completedOrderIds=Array.isArray(st.completedOrderIds)?st.completedOrderIds:[];if(!st.completedOrderIds.includes(String(entry.orderId)))st.completedOrderIds.push(String(entry.orderId));
+        st.history=Array.isArray(st.history)?st.history:[];st.history.push({index:idx+1,orderId:entry.orderId,ok:true,items:rec.items.length,imagesOk:rec.counts.ok,notFound:rec.counts.notFound,ambiguous:rec.counts.ambiguous,unmapped:rec.counts.unmapped,at:new Date().toISOString()});st.index=idx+1;saveImageState(st);
+        setStatus(`Fáza 3: ${idx+1}/${st.queue.length}. ${entry.orderId}: obrázky OK ${rec.counts.ok}/${rec.items.length}, nejasné ${rec.counts.ambiguous}, nenájdené ${rec.counts.notFound}, nepriradené ${rec.counts.unmapped}.`);
+      }
+    }
+    if(st.index>=st.queue.length){await sleep(700);await finishImages(st);return}
+    await sleep(IMAGE_BETWEEN_MS);const next=st.queue[st.index];location.href=next.url;
+  }catch(e){const cur=imageState()||st;cur.running=false;cur.error=String(e?.message||e);saveImageState(cur);setStatus('Fáza 3 sa zastavila: '+cur.error,true)}finally{imageRunningNow=false;setBusy(false)}
+}
+
+async function finishImages(st){
+  st.running=false;st.finishedAt=new Date().toISOString();saveImageState(st);
+  const a=imageOrders(),all=a.flatMap(x=>x.items||[]),ok=all.filter(x=>x.detailImageStatus==='ok').length,amb=all.filter(x=>x.detailImageStatus==='ambiguous').length,nf=all.filter(x=>x.detailImageStatus==='not-found').length,um=all.length-ok-amb-nf;
+  setStatus(`Fáza 3 hotová. Objednávky: ${a.length}/${st.queue.length}; položky: ${all.length}; obrázky OK: ${ok}; nejasné: ${amb}; nenájdené: ${nf}; nepriradené: ${um}; chyby stránok: ${(st.errors||[]).length}.`);
+  if(st.returnUrl&&location.href!==st.returnUrl){await sleep(2500);location.href=st.returnUrl}
+}
+
 function stopMulti(){const st=multiState();if(st){st.running=false;st.stoppedAt=new Date().toISOString();saveMulti(st)}setStatus('Fáza 1 zastavená.',true)}
 function stopDetails(){const st=detailState();if(st){st.running=false;st.stoppedAt=new Date().toISOString();saveDetailState(st)}setStatus('Fáza 2 Details zastavená. Stav zostal uložený.',true)}
-function clearDetailsButton(){if(confirm('Vymazať iba údaje fázy Details? Orders a zoznam 437 objednávok zostanú zachované.'))resetDetailsOnly(false)}
+function stopImages(){const st=imageState();if(st){st.running=false;st.stoppedAt=new Date().toISOString();saveImageState(st)}setStatus('Fáza 3 obrázky zastavená. Už získané obrázky zostali uložené.',true)}
+function clearDetailsButton(){if(confirm('Vymazať iba údaje fázy Details? Orders zostanú zachované, ale vymaže sa aj vrstva obrázkov naviazaná na Details.')){resetDetailsOnly(true);resetImagesOnly(true);setStatus('Details aj naviazaná vrstva obrázkov boli vymazané. Orders zostali zachované.')}}
+function clearImagesButton(){if(confirm('Vymazať iba výsledky fázy obrázkov? Orders aj Details zostanú zachované.'))resetImagesOnly(false)}
 
 function esc(v){let s=String(v??'').replace(/\r?\n/g,' ');return'"'+s.replace(/"/g,'""')+'"'}
 function csv(){const a=rows(),o=[HEAD.map(esc).join(SEP)];for(const r of a)o.push(HEAD.map(h=>esc(r[h]??'')).join(SEP));return'\uFEFF'+o.join('\r\n')}
 function dl(name,data,type){const u=URL.createObjectURL(new Blob([data],{type})),a=document.createElement('a');a.href=u;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),3000)}
 const stamp=()=>new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
 function exportCSV(){dl(`aliexpress_orders_${stamp()}.csv`,csv(),'text/csv;charset=utf-8');setStatus(`CSV exportované: ${rows().length} riadkov.`)}
-function exportJSON(){dl(`aliexpress_orders_${stamp()}.json`,JSON.stringify({exportedAt:new Date().toISOString(),scriptVersion:VERSION,detailParserVersion:DETAIL_PARSER_VERSION,multiPass:multiState(),detailState:detailState(),details:detailOrders(),rows:rows()},null,2),'application/json;charset=utf-8');setStatus(`JSON exportované. Orders riadky: ${rows().length}; Details objednávky: ${detailOrders().length}.`)}
+function exportJSON(){dl(`aliexpress_orders_${stamp()}.json`,JSON.stringify({exportedAt:new Date().toISOString(),scriptVersion:VERSION,detailParserVersion:DETAIL_PARSER_VERSION,imageParserVersion:IMAGE_PARSER_VERSION,multiPass:multiState(),detailState:detailState(),imageState:imageState(),details:detailOrders(),images:imageOrders(),rows:rows()},null,2),'application/json;charset=utf-8');setStatus(`JSON exportované. Orders: ${rows().length}; Details: ${detailOrders().length}; Images objednávky: ${imageOrders().length}.`)}
 async function copy(){const s=csv();try{if(typeof GM_setClipboard==='function')GM_setClipboard(s,'text');else await navigator.clipboard.writeText(s);setStatus(`CSV skopírované: ${rows().length} riadkov.`)}catch(e){setStatus('Kopírovanie zlyhalo: '+e.message,true)}}
-function clearData(){if(confirm('Vymazať VŠETKY nazbierané údaje: Orders, stav priechodov aj údaje z Details?')){for(const k of [KEY,MULTI_KEY,DETAIL_KEY,DETAIL_STATE_KEY])localStorage.removeItem(k);count();setProgress(0,0);setStatus('Všetky údaje boli vymazané.')}}
+function clearData(){if(confirm('Vymazať VŠETKY nazbierané údaje: Orders, Details aj obrázky?')){for(const k of [KEY,MULTI_KEY,DETAIL_KEY,DETAIL_STATE_KEY,IMAGE_KEY,IMAGE_STATE_KEY])localStorage.removeItem(k);count();setProgress(0,0);setStatus('Všetky údaje boli vymazané.')}}
 
 function count(){
   const e=document.getElementById('ae-count');if(e)e.textContent=rows().length;
   const s=multiState(),m=document.getElementById('ae-multi');if(m)m.textContent=s?.knownOrderIds?.length?`Unikátne objednávky: ${s.knownOrderIds.length}`:'';
   const ds=detailState(),d=detailOrders(),de=document.getElementById('ae-details');if(de){const items=d.reduce((n,x)=>n+(x.items?.length||0),0);const total=ds?.queue?.length||s?.knownOrderIds?.length||0;de.textContent=`Details: ${d.length}${total?' / '+total:''} objednávok; položky: ${items}`}
+  const is=imageState(),im=imageOrders(),ie=document.getElementById('ae-images');if(ie){const all=im.flatMap(x=>x.items||[]),ok=all.filter(x=>x.detailImageStatus==='ok').length,amb=all.filter(x=>x.detailImageStatus==='ambiguous').length,total=is?.queue?.length||d.filter(x=>x.items?.length).length||0;ie.textContent=`Obrázky: ${im.length}${total?' / '+total:''} objednávok; OK ${ok}/${all.length}${amb?`; nejasné ${amb}`:''}`}
 }
 function setStatus(s,err=false){const e=document.getElementById('ae-status');if(e){e.textContent=s;e.style.color=err?'#ffb4b4':'#d7ffd7'}}
 function setProgress(done,total){const e=document.getElementById('ae-progress');if(e)e.textContent=total?`Spracované: ${done} / ${total}`:''}
@@ -705,28 +957,35 @@ function btn(p,s,f,c,stop=false){const b=document.createElement('button');b.text
 
 function panel(){
   if(document.getElementById(PANEL)||!document.body)return;
-  const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:80px!important;right:12px!important;width:320px!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';
-  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details DOM variant v3</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
+  const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:62px!important;right:12px!important;width:340px!important;max-height:calc(100vh - 74px)!important;overflow:auto!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';
+  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div id="ae-images" style="font-size:10px;color:#ffd479;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details images v1</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
   btn(p,'1. Viacnásobne načítať + naskenovať',startMultiPass,'#238636');
   btn(p,'Zastaviť fázu 1',stopMulti,'#a66321',true);
   btn(p,'2. Načítať presné údaje z Details',startDetails,'#8250df');
   btn(p,'Zastaviť Details',stopDetails,'#9a6700',true);
   btn(p,'Vymazať iba Details',clearDetailsButton,'#6e5a24');
-  btn(p,'3. Export CSV (Orders)',exportCSV,'#1f6feb');
-  btn(p,'Export JSON (Orders + Details)',exportJSON,'#6f42c1');
+  btn(p,'3. Načítať obrázky z Details',startImages,'#bf8700');
+  btn(p,'Zastaviť obrázky',stopImages,'#9a6700',true);
+  btn(p,'Vymazať iba obrázky',clearImagesButton,'#6e5a24');
+  btn(p,'4. Export CSV (Orders)',exportCSV,'#1f6feb');
+  btn(p,'Export JSON (Orders + Details + Images)',exportJSON,'#6f42c1');
   btn(p,'Kopírovať CSV',copy,'#0969da');
   btn(p,'Vymazať všetky uložené dáta',clearData,'#b62324');
   const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';
-  s.textContent=sessionStorage.getItem('AE_EXPORT_SK_2026_DETAILS_MIGRATED')?'Nový parser variantov odstránil starú vrstvu Details. Orders zostali zachované. Spusti fázu 2 nanovo.':'Fáza 2 preferuje samostatný riadok medzi názvom produktu a cenou ako presný variant. Množstvo berie iba z ceny ×N.';
+  if(sessionStorage.getItem('AE_EXPORT_SK_2026_IMAGES_MIGRATED'))s.textContent='Staré výsledky obrázkov boli odstránené. Orders a Details zostali zachované.';
+  else s.textContent='v0.9.12 zachováva hotové Details. Fáza 3 uloží obrázok iba vtedy, keď ho bezpečne priradí v rovnakom produktovom bloku.';
   p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none';
 }
 
 function init(){
   migrateOldDetails();
+  migrateOldImages();
   if(document.body)panel();else document.addEventListener('DOMContentLoaded',panel,{once:true});
   setTimeout(panel,500);setTimeout(panel,1500);
   setTimeout(()=>{
     count();
+    const ims=imageState();
+    if(ims?.running&&ims.parserVersion===IMAGE_PARSER_VERSION){continueImages();return}
     const ds=detailState();
     if(ds?.running&&ds.parserVersion===DETAIL_PARSER_VERSION){continueDetails();return}
     const ms=multiState();if(ms?.running&&!isDetailPage())continueMultiPass();
