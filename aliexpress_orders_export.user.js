@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AliExpress objednávky -> CSV/JSON + Details
 // @namespace    SlavcoSK
-// @version      0.9.12
+// @version      0.9.13
 // @description  Export AliExpress Orders + presné Details + konzervatívne obrázky z rovnakého produktového bloku v Details.
 // @match        *://*.aliexpress.com/*
 // @match        *://aliexpress.com/*
@@ -13,10 +13,10 @@
 (() => {
 'use strict';
 
-const VERSION='0.9.12';
+const VERSION='0.9.13';
 // Details parser nemeníme: už overených 437 Details zostáva zachovaných.
 const DETAIL_PARSER_VERSION='0.9.11-dom-variant-v3';
-const IMAGE_PARSER_VERSION='0.9.12-details-image-v1';
+const IMAGE_PARSER_VERSION='0.9.13-details-image-v2';
 const KEY='AE_EXPORT_SK_2026';
 const MULTI_KEY='AE_EXPORT_SK_2026_MULTI';
 const DETAIL_KEY='AE_EXPORT_SK_2026_DETAILS';
@@ -713,7 +713,7 @@ async function finishDetails(st){
   if(st.returnUrl&&location.href!==st.returnUrl){await sleep(2500);location.href=st.returnUrl}
 }
 
-// ---------------- FÁZA 3: OBRÁZKY Z DETAILS 0.9.12 ----------------
+// ---------------- FÁZA 3: OBRÁZKY Z DETAILS 0.9.13 ----------------
 function imageUrlCandidates(img){
   if(!img)return[];
   const out=[],seen=new Set();
@@ -797,13 +797,56 @@ function domRowMatchScore(d,item){
   else if(!iv&&!dv)s+=1;
   return s;
 }
+function imageDomRowSignature(d){
+  return [itemUrl(d?.productUrl||''),clean(d?.productTitle),clean(d?.productVariant),clean(d?.itemPrice),clean(d?.productQuantity)].join('||');
+}
+function imageNodeStrength(node){
+  if(!node)return 0;
+  let score=0;
+  const imgs=[...node.querySelectorAll?.('img')||[]];
+  for(const img of imgs){
+    const urls=imageUrlCandidates(img);
+    if(urls.length)score+=4;
+    const rect=img.getBoundingClientRect?.()||{width:0,height:0};
+    const w=Number(img.naturalWidth||img.getAttribute?.('width')||img.width||rect.width||0);
+    const h=Number(img.naturalHeight||img.getAttribute?.('height')||img.height||rect.height||0);
+    if(w>=42&&h>=42)score+=2;
+    if(w>=70&&h>=70)score+=2;
+    if(w>=120&&h>=120)score+=2;
+    if(w&&h&&Math.max(w/h,h/w)<=3.0)score+=1;
+    const hint=clean(`${img.className||''} ${img.id||''} ${img.getAttribute?.('alt')||''} ${img.getAttribute?.('title')||''}`);
+    if(IMAGE_UI_HINT.test(hint))score-=6;
+  }
+  score+=Math.min(imgs.length,4);
+  score+=Math.min((node.querySelectorAll?.('a[href*="/item/"]').length||0),2);
+  return score;
+}
+function dedupeImageDomRows(rawRows){
+  const groups=new Map();
+  for(const row of rawRows||[]){
+    const sig=imageDomRowSignature(row);
+    if(!groups.has(sig))groups.set(sig,[]);
+    groups.get(sig).push(row);
+  }
+  const out=[];
+  for(const group of groups.values()){
+    let best=group[0],bestScore=imageNodeStrength(group[0]?.node),bestLen=clean(group[0]?.node?.innerText||'').length||999999;
+    for(const row of group.slice(1)){
+      const sc=imageNodeStrength(row?.node),ln=clean(row?.node?.innerText||'').length||999999;
+      if(sc>bestScore||(sc===bestScore&&ln<bestLen)){best=row;bestScore=sc;bestLen=ln}
+    }
+    out.push({...best,_imageDuplicateCount:group.length,_imageNodeStrength:bestScore});
+  }
+  out.sort((a,b)=>a.node===b.node?0:(a.node.compareDocumentPosition(b.node)&Node.DOCUMENT_POSITION_FOLLOWING?-1:1));
+  return out;
+}
 function mapStoredItemsToDomRows(orderRec){
-  const items=orderRec?.items||[],domRows=detailDomItemRows(),mapped=Array(items.length).fill(null),used=new Set();
+  const items=orderRec?.items||[],rawDomRows=detailDomItemRows(),domRows=dedupeImageDomRows(rawDomRows),mapped=Array(items.length).fill(null),used=new Set();
 
   if(domRows.length===items.length){
     let safe=true;
     for(let i=0;i<items.length;i++)if(domRowMatchScore(domRows[i],items[i])<5){safe=false;break}
-    if(safe){for(let i=0;i<items.length;i++){mapped[i]=domRows[i];used.add(i)}return{mapped,domRows}}
+    if(safe){for(let i=0;i<items.length;i++){mapped[i]=domRows[i];used.add(i)}return{mapped,domRows,rawDomRows}}
   }
 
   for(let i=0;i<items.length;i++){
@@ -813,11 +856,11 @@ function mapStoredItemsToDomRows(orderRec){
       const score=domRowMatchScore(domRows[j],items[i]);
       if(score>-999)scored.push({j,score});
     }
-    scored.sort((a,b)=>b.score-a.score);
+    scored.sort((a,b)=>b.score-a.score||((domRows[b.j]?._imageDuplicateCount||1)-(domRows[a.j]?._imageDuplicateCount||1))||((domRows[b.j]?._imageNodeStrength||0)-(domRows[a.j]?._imageNodeStrength||0)));
     const top=scored[0],second=scored[1];
     if(top&&top.score>=7&&(!second||top.score-second.score>=3)){mapped[i]=domRows[top.j];used.add(top.j)}
   }
-  return{mapped,domRows};
+  return{mapped,domRows,rawDomRows};
 }
 async function wakeImageRows(mapped){
   const seen=new Set();
@@ -830,10 +873,11 @@ async function wakeImageRows(mapped){
   await sleep(IMAGE_PAGE_SETTLE_MS);
 }
 async function parseImagesPage(orderRec,queueEntry){
-  const {mapped,domRows}=mapStoredItemsToDomRows(orderRec);
+  const {mapped,domRows,rawDomRows}=mapStoredItemsToDomRows(orderRec);
   await wakeImageRows(mapped);
   const items=(orderRec.items||[]).map((item,i)=>{
-    const img=chooseDetailImage(mapped[i]?.node||null,item);
+    const row=mapped[i]||null;
+    const img=chooseDetailImage(row?.node||null,item);
     return{
       itemIndex:item.itemIndex||i+1,
       productUrl:item.productUrl||'',
@@ -850,6 +894,8 @@ async function parseImagesPage(orderRec,queueEntry){
       detailImageUrlSource:img.urlSource||'',
       detailImageCandidateCount:img.candidateCount||0,
       detailImageCandidates:img.candidates||[],
+      detailImageDuplicateBlockCount:row?._imageDuplicateCount||1,
+      detailImageNodeStrength:row?._imageNodeStrength||'',
       detailImageNote:img.note||''
     };
   });
@@ -862,6 +908,7 @@ async function parseImagesPage(orderRec,queueEntry){
     detailUrlSource:queueEntry?.source||'',
     parsedAt:new Date().toISOString(),
     expectedItems:(orderRec.items||[]).length,
+    domItemRowsRaw:rawDomRows.length,
     domItemRows:domRows.length,
     counts,
     items
@@ -958,7 +1005,7 @@ function btn(p,s,f,c,stop=false){const b=document.createElement('button');b.text
 function panel(){
   if(document.getElementById(PANEL)||!document.body)return;
   const p=document.createElement('div');p.id=PANEL;p.style.cssText='position:fixed!important;top:62px!important;right:12px!important;width:340px!important;max-height:calc(100vh - 74px)!important;overflow:auto!important;z-index:2147483647!important;background:#18181c!important;color:white!important;border:3px solid #00d26a!important;border-radius:10px!important;padding:10px!important;font:12px Arial!important;box-shadow:0 4px 20px #0008!important;';
-  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div id="ae-images" style="font-size:10px;color:#ffd479;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details images v1</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
+  p.innerHTML=`<div style="font-size:14px;font-weight:bold;color:#7CFF9A">✓ AliExpress export SK 2026</div><div>Produktové riadky: <span id="ae-count">0</span></div><div id="ae-multi" style="font-size:10px;color:#9fd3ff;margin-top:2px"></div><div id="ae-details" style="font-size:10px;color:#c7a8ff;margin-top:2px"></div><div id="ae-images" style="font-size:10px;color:#ffd479;margin-top:2px"></div><div style="font-size:10px;color:#bbb;margin-top:3px">v${VERSION} – Details images v2</div><div id="ae-translator" style="margin-top:6px;padding:6px;border-radius:5px;background:#5b1d1d;color:#ffd7d7;display:none"><b>⚠ Translator je zapnutý.</b><br>Pred skenovaním ho vypni.</div><div id="ae-progress" style="margin-top:5px;color:#9fd3ff"></div><div id="ae-busy" style="color:#ffe28a"></div><div style="height:6px"></div>`;
   btn(p,'1. Viacnásobne načítať + naskenovať',startMultiPass,'#238636');
   btn(p,'Zastaviť fázu 1',stopMulti,'#a66321',true);
   btn(p,'2. Načítať presné údaje z Details',startDetails,'#8250df');
@@ -973,7 +1020,7 @@ function panel(){
   btn(p,'Vymazať všetky uložené dáta',clearData,'#b62324');
   const s=document.createElement('div');s.id='ae-status';s.style.cssText='margin-top:8px;color:#d7ffd7;line-height:1.35';
   if(sessionStorage.getItem('AE_EXPORT_SK_2026_IMAGES_MIGRATED'))s.textContent='Staré výsledky obrázkov boli odstránené. Orders a Details zostali zachované.';
-  else s.textContent='v0.9.12 zachováva hotové Details. Fáza 3 uloží obrázok iba vtedy, keď ho bezpečne priradí v rovnakom produktovom bloku.';
+  else s.textContent='v0.9.13 zachováva hotové Details. Fáza 3 teraz najprv deduplikuje dvojité DOM bloky tej istej položky a až potom hľadá obrázok v rovnakom produktovom bloku.';
   p.append(s);document.body.append(p);count();const tw=document.getElementById('ae-translator');if(tw)tw.style.display=translatorActive()?'block':'none';
 }
 
