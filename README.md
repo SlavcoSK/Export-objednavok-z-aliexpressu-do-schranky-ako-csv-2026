@@ -18,7 +18,7 @@ Priamy Raw odkaz:
 
 ## Aktuálna verzia
 
-**0.9.12**
+**0.9.13**
 
 Parser Details zostáva zámerne nezmenený:
 
@@ -26,11 +26,13 @@ Parser Details zostáva zámerne nezmenený:
 
 Nový parser obrázkov:
 
-`0.9.12-details-image-v1`
+`0.9.13-details-image-v2`
 
-## Dôležité pri aktualizácii z 0.9.11
+## Dôležité pri aktualizácii z 0.9.12
 
-Verzia 0.9.12 **nemaže hotové Details z 0.9.11**. `DETAIL_PARSER_VERSION` zostáva rovnaký, takže už načítaná a overená vrstva Details sa zachová.
+Verzia 0.9.13 **nemaže hotové Details z 0.9.11**. `DETAIL_PARSER_VERSION` zostáva rovnaký, takže už načítaná a overená vrstva Details sa zachová.
+
+Mení sa iba parser obrázkov. Staré výsledky fázy obrázkov z 0.9.12 sa pri prvom spustení 0.9.13 odstránia a fáza 3 začne nanovo. Orders ani Details sa tým nemenia.
 
 Obrázky majú vlastné kľúče v `localStorage`:
 
@@ -63,7 +65,7 @@ Tým sa zachovávajú napríklad varianty:
 
 ## Fáza 3 – obrázky z Details
 
-Nové tlačidlo:
+Tlačidlo:
 
 **3. Načítať obrázky z Details**
 
@@ -71,12 +73,30 @@ Fáza 3 používa iba už hotové objednávky Details, ktoré obsahujú aspoň j
 
 Skript znovu otvorí stránku Details a pri každej overenej položke najprv nájde jej konkrétny DOM blok podľa kombinácie:
 
-- poradia položky,
 - `productUrl`,
 - názvu,
 - variantu,
 - ceny,
 - množstva.
+
+### Nové vo v0.9.13 – deduplikácia dvojitých DOM blokov
+
+Pri prvom teste 0.9.12 sa ukázalo, že AliExpress môže mať pre jednu vizuálnu produktovú položku v DOM dve paralelné reprezentácie. Preto napríklad objednávka s 11 položkami KSD9700 vytvorila 22 kandidátskych DOM blokov a konzervatívny mapper ich odmietol ako nejednoznačné.
+
+Verzia 0.9.13 preto pred mapovaním obrázka najprv zoskupí DOM bloky s rovnakou identitou:
+
+`productUrl + productTitle + productVariant + itemPrice + productQuantity`
+
+Z každej takej skupiny ponechá jeden reprezentatívny blok. Pri výbere preferuje blok so silnejším obrazovým obsahom a vhodnejšími `img` prvkami.
+
+Skutočné samostatné varianty sa tým nemajú zlúčiť. Napríklad KSD9700 varianty `50C`, `45C`, `150C` atď. zostávajú samostatné, pretože majú rozdielny `productVariant`.
+
+Pre kontrolu export v0.9.13 pridáva:
+
+- `domItemRowsRaw` – počet DOM kandidátov pred deduplikáciou,
+- `domItemRows` – počet DOM blokov po deduplikácii,
+- `detailImageDuplicateBlockCount` – koľko paralelných DOM blokov bolo zoskupených pre konkrétnu položku,
+- `detailImageNodeStrength` – pomocné skóre vybraného DOM bloku.
 
 Obrázok sa potom hľadá **iba v tom istom produktovom bloku**. Skript neberie všeobecný obrázok zo stránky a nepriraďuje obrázky podľa podobnosti názvu mimo daného bloku.
 
@@ -110,6 +130,8 @@ Pri každej položke sa ukladajú najmä:
 - `detailImageUrlSource`,
 - `detailImageCandidateCount`,
 - `detailImageCandidates`,
+- `detailImageDuplicateBlockCount`,
+- `detailImageNodeStrength`,
 - `detailImageNote`.
 
 Ak je obrázok prijatý, typický zdroj je:
@@ -148,19 +170,19 @@ Fáza obrázkov má samostatný stav v `localStorage`.
 
 Ak ju zastavíte tlačidlom **Zastaviť obrázky**, už získané obrázky zostanú uložené. Pri ďalšom spustení skript ponúkne pokračovanie od poslednej nespracovanej objednávky.
 
-## Odporúčaný prvý test v0.9.12
+## Odporúčaný test v0.9.13
 
 1. Aktualizujte userscript cez Raw.
 2. Obnovte AliExpress cez `Ctrl+F5`.
-3. Skontrolujte panel **v0.9.12 – Details images v1**.
-4. Overte, že v paneli stále vidíte hotovú vrstvu Details – aktualizácia na 0.9.12 ju nemá vymazať.
+3. Skontrolujte panel **v0.9.13 – Details images v2**.
+4. Overte, že v paneli stále vidíte hotovú vrstvu Details 437/437.
 5. Vypnite Google Translator.
 6. Otvorte **Account → Orders**.
 7. Kliknite **3. Načítať obrázky z Details**.
-8. Na prvý test nechajte prejsť približne 5–10 objednávok.
+8. Na prvý test nechajte prejsť približne 10–12 objednávok.
 9. Kliknite **Zastaviť obrázky**.
 10. Exportujte **JSON (Orders + Details + Images)**.
-11. Skontrolujte hlavne viacpoložkové objednávky a objednávku KSD9700 s viacerými variantmi rovnakého produktu.
+11. Pri KSD9700 skontrolujte najmä, či `domItemRowsRaw` ukazuje dvojitý počet a `domItemRows` po deduplikácii zodpovedá 11 skutočným položkám.
 
 Až po overení malej vzorky má zmysel nechať fázu obrázkov prejsť celý zoznam.
 
@@ -181,7 +203,7 @@ Až po overení malej vzorky má zmysel nechať fázu obrázkov prejsť celý zo
 
 ## JSON export
 
-Kontrolný JSON teraz obsahuje samostatne:
+Kontrolný JSON obsahuje samostatne:
 
 - `multiPass`,
 - `detailState`,
@@ -207,7 +229,7 @@ Pri všetkých fázach odporúčame Google Translator vypnúť. Preklad môže m
 3. Tampermonkey ponúkne aktualizáciu existujúceho skriptu.
 4. Uložte skript.
 5. Obnovte AliExpress cez `Ctrl+F5`.
-6. Skontrolujte **v0.9.12 – Details images v1**.
+6. Skontrolujte **v0.9.13 – Details images v2**.
 
 `@name` zostáva nezmenený, aby Tampermonkey aktualizoval existujúcu líniu skriptu.
 
