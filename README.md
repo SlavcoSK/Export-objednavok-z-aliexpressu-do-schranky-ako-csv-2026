@@ -1,12 +1,12 @@
 # Export objednávok z AliExpressu do CSV/JSON (2026)
 
-Tampermonkey userscript na získanie histórie objednávok z AliExpressu. Projekt je rozdelený na samostatné fázy:
+Tampermonkey userscript na získanie histórie objednávok z AliExpressu. Projekt je rozdelený na tri samostatné fázy:
 
 1. načítanie čo najkompletnejšieho zoznamu **Orders**,
 2. postupné čítanie presných údajov zo stránky **Details**,
-3. obrázky budú riešené až v ďalšom kroku.
+3. konzervatívne priradenie **obrázkov priamo z produktového bloku v Details**.
 
-Skript je zámerne konzervatívny. Ak nedokáže bezpečne oddeliť názov, variant alebo produktový URL, hodnotu radšej nechá prázdnu a zachová text položky na kontrolu.
+Skript je zámerne konzervatívny. Ak nedokáže údaj alebo obrázok bezpečne priradiť, nič nehádá a pole nechá prázdne alebo označí ako nejasné.
 
 ## Hlavný userscript
 
@@ -18,216 +18,187 @@ Priamy Raw odkaz:
 
 ## Aktuálna verzia
 
-**0.9.11**
+**0.9.12**
 
-Parser Details:
+Parser Details zostáva zámerne nezmenený:
 
 `0.9.11-dom-variant-v3`
 
-## Čo je nové vo v0.9.11
+Nový parser obrázkov:
 
-Verzia 0.9.11 dopĺňa presnejšie čítanie **variantu každej položky priamo z DOM stránky Details**.
+`0.9.12-details-image-v1`
 
-Na AliExpress Details je pri mnohých produktoch zobrazenie v tvare:
+## Dôležité pri aktualizácii z 0.9.11
 
-`názov produktu`
+Verzia 0.9.12 **nemaže hotové Details z 0.9.11**. `DETAIL_PARSER_VERSION` zostáva rovnaký, takže už načítaná a overená vrstva Details sa zachová.
 
-`variant / model / konfigurácia`
+Obrázky majú vlastné kľúče v `localStorage`:
 
-`cena xN`
+- `AE_EXPORT_SK_2026_IMAGES`,
+- `AE_EXPORT_SK_2026_IMAGE_STATE`.
 
-Nový parser preto dáva najvyššiu prioritu samostatnému textovému riadku medzi názvom produktu a cenou.
+Vrstva obrázkov sa preto môže testovať, zastaviť, vymazať a spustiť znova bez zásahu do Orders alebo Details.
 
-Príklady, ktoré má správne zachytiť:
+## Fáza 1 – Orders
 
-- KSD9700: `Metal 10A, Normally closed, 135C`, `130C`, `110C`, `105C`, `100C`, `95C` atď.,
-- NTC MF58: `10K`,
-- FPC konektor: `32P, Bottom Contact, 0.5MM`,
-- SW420: `20PCS`,
-- tlakový snímač: `12V 0.5-4.5V 1/8N, 750psi gauge`,
-- iný tlakový snímač: `12V in 0.5 4.5V 1/8N, 16bar G with cable`.
+Fáza 1 používa viac priechodov stránky Orders a zlučuje unikátne `orderId`. Aktuálne nastavenie zostáva rovnaké ako v 0.9.11:
 
-Ak taký samostatný variantový riadok v DOM existuje, uloží sa do `productVariant` a zdroj do `productVariantSource`.
-
-Nové pomocné polia pri detailnej položke:
-
-- `productTitleSource`,
-- `productVariantSource`.
-
-Typický zdroj presného variantu bude:
-
-`details-dom-row` alebo `dom-row-between-title-price`.
-
-Ak samostatný riadok neexistuje, parser sa môže oprieť o už známu hranicu názvu v `productLineText`. Ak ani tá nie je jednoznačná, variant zostane prázdny.
-
-## Dôležité pravidlo pre množstvo
-
-Množstvo objednaných balení sa naďalej číta **iba z `xN` priamo pri cene**.
-
-Napríklad:
-
-`20PCS Thermal Resistor ... 10K US $5.02 x1`
-
-znamená:
-
-- názov produktu obsahuje `20PCS` – obsah balenia,
-- variant je `10K`,
-- cena položky je `5.02 USD`,
-- `productQuantity = 1` – objednané jedno balenie.
-
-Rovnako čísla ako `100X`, `100:1`, `20PCS`, `750psi`, `16bar` alebo teplota `135C` sa nesmú zameniť za objednané množstvo.
-
-## Fáza 1 – zoznam Orders
-
-AliExpress nemusí po opakovanom klikaní na **View orders** pri každom načítaní zobraziť rovnakú množinu historických objednávok. Preto skript používa viac priechodov.
-
-Aktuálne nastavenie:
-
-- maximálne **12 priechodov**,
-- koniec po **2 po sebe idúcich priechodoch bez novej objednávky**,
-- približne **3 s** na ustálenie po pribudnutí objednávok,
-- približne **3 s** po reloadnutí stránky,
-- približne **3 s** medzi priechodmi,
-- maximálne **9 s** na reakciu po kliknutí na `View orders`; ide iba o horný timeout.
-
-Už zachytené `orderId` sa naprieč priechodmi zlučujú.
+- maximálne 12 priechodov,
+- koniec po 2 nulových priechodoch za sebou,
+- už známe objednávky sa medzi priechodmi nestratia.
 
 ## Fáza 2 – presné údaje z Details
 
-Po dokončení fázy 1 kliknite na:
+Parser Details zostáva vo verzii `0.9.11-dom-variant-v3`.
 
-**2. Načítať presné údaje z Details**
+Množstvo sa číta iba z `xN` bezprostredne pri cene. Samostatný riadok medzi názvom produktu a cenou má prioritu ako `productVariant`.
 
-Skript postupne otvára stránky:
+Tým sa zachovávajú napríklad varianty:
 
-`https://www.aliexpress.com/p/order/detail.html?...&orderId=...`
+- `Metal 10A, Normally closed, 135C`,
+- `10K`,
+- `32P, Bottom Contact, 0.5MM`,
+- `20PCS`,
+- technické varianty tlakových snímačov.
 
-Používa existujúcu prihlásenú session AliExpressu. Prihlasovacie meno ani heslo sa do userscriptu neukladajú.
+## Fáza 3 – obrázky z Details
 
-Pri každej objednávke sa ukladajú napríklad:
+Nové tlačidlo:
 
-- `orderId`,
-- predajca,
-- dátum vytvorenia objednávky,
-- dátum zaplatenia,
-- dátum dokončenia zásielky,
-- dátum dokončenia objednávky,
-- `Subtotal`,
-- `Total`,
-- menu,
-- jednotlivé produktové položky.
+**3. Načítať obrázky z Details**
 
-Pri každej detailnej položke sa ukladajú:
+Fáza 3 používa iba už hotové objednávky Details, ktoré obsahujú aspoň jednu produktovú položku. Historické objednávky bez detailných položiek sa automaticky preskočia.
+
+Skript znovu otvorí stránku Details a pri každej overenej položke najprv nájde jej konkrétny DOM blok podľa kombinácie:
+
+- poradia položky,
+- `productUrl`,
+- názvu,
+- variantu,
+- ceny,
+- množstva.
+
+Obrázok sa potom hľadá **iba v tom istom produktovom bloku**. Skript neberie všeobecný obrázok zo stránky a nepriraďuje obrázky podľa podobnosti názvu mimo daného bloku.
+
+### Stavy obrázka
+
+Každá položka vo vrstve `images` môže mať:
+
+- `detailImageStatus = "ok"` – obrázok bol bezpečne priradený,
+- `detailImageStatus = "not-found"` – v bloku sa nenašiel použiteľný obrázok,
+- `detailImageStatus = "ambiguous"` – existuje viac podobne silných kandidátov alebo je kandidát slabý,
+- `detailImageStatus = "unmapped-item-block"` – aktuálny DOM blok položky nebolo možné bezpečne spojiť s uloženou položkou Details.
+
+Pri `ambiguous` sa `detailImageUrl` zámerne nechá prázdny. Pre kontrolu sa môžu uložiť najlepšie kandidátske URL a ich skóre.
+
+### Ukladané polia obrázka
+
+Pri každej položke sa ukladajú najmä:
 
 - `itemIndex`,
-- `productLineText`,
-- `productTitle`,
-- `productTitleSource`,
-- `productVariant`,
-- `productVariantSource`,
-- `estimatedDeliveryDate`,
-- `productQuantity`,
-- `itemPrice`,
-- `currency`,
 - `productUrl`,
-- `rawItemText`,
-- `parserNote`.
+- `productTitle`,
+- `productVariant`,
+- `itemPrice`,
+- `productQuantity`,
+- `detailImageUrl`,
+- `detailImageSource`,
+- `detailImageStatus`,
+- `detailImageScore`,
+- `detailImageWidth`,
+- `detailImageHeight`,
+- `detailImageUrlSource`,
+- `detailImageCandidateCount`,
+- `detailImageCandidates`,
+- `detailImageNote`.
 
-## Ako parser v0.9.11 hľadá variant
+Ak je obrázok prijatý, typický zdroj je:
 
-Parser kombinuje dve vrstvy:
+`details-same-item-block`
 
-1. textový parser rozdelí objednávku na samostatné položky podľa väzby **cena + `xN`**,
-2. DOM parser nájde najmenší produktový blok, v ktorom je presne jedna väzba cena + `xN`, a prečíta jednotlivé textové riadky pred cenou.
+## Ako sa kandidát obrázka hodnotí
 
-Ak blok obsahuje napríklad:
+Parser používa konzervatívne skóre. Silnými znakmi sú najmä:
 
-`KSD9700 250V 5A 10A 16A 40~155 Degree ...`
+- obrázok je vo vnútri odkazu na rovnaký `productUrl`,
+- URL vyzerá ako produktové CDN AliExpressu,
+- cesta obsahuje `/kf/`,
+- obrázok má rozumné rozmery,
+- `alt` alebo `title` sa prekrýva s názvom produktu.
 
-`Metal 10A, Normally closed, 130C`
+Naopak logá, avatary, ikony, vlajky, kupóny, platobné symboly a podobné UI obrázky dostávajú záporné skóre.
 
-`US $1.16 x1`
+Ak dva rozdielne obrázky vyjdú príliš podobne, skript ich označí ako `ambiguous` a nič automaticky nepriradí.
 
-uloží sa:
+## Lazy-loading obrázkov
 
-- `productTitle = KSD9700 ...`,
-- `productVariant = Metal 10A, Normally closed, 130C`,
-- `productQuantity = 1`,
-- `itemPrice = 1.16`.
+Pred čítaním obrázkov skript každý bezpečne priradený produktový blok krátko posunie do viditeľnej časti stránky. Tým dá AliExpressu možnosť načítať lazy-loaded `img`.
 
-Pri objednávke s viacerými variantmi rovnakého produktu sa položky mapujú v poradí DOM. To je dôležité napríklad pri 11 rôznych teplotách KSD9700.
+Skript kontroluje okrem `src` aj napríklad:
 
-## Súkromie
-
-Fáza Details zámerne neukladá:
-
-- meno príjemcu,
-- doručovaciu adresu,
-- telefónne číslo,
-- platobnú metódu,
-- prihlasovacie údaje.
-
-`rawOrderDetailText` sa skladá iba z bezpečných údajov potrebných pre databázu: číslo objednávky, dátumy, predajca, položky, subtotal a total.
-
-## Prechod z 0.9.10 na 0.9.11
-
-Pretože sa zmenil parser variantov, v0.9.11 pri prvom spustení automaticky odstráni starú vrstvu **Details** vytvorenú predchádzajúcim parserom.
-
-**Vrstva Orders a zoznam známych objednávok zostanú zachované.**
-
-Fázu 1 preto netreba spúšťať znova iba kvôli aktualizácii parsera Details.
+- `data-src`,
+- `data-original`,
+- `data-lazy-src`,
+- `currentSrc`,
+- `srcset`.
 
 ## Obnova po prerušení
 
-Stav fázy 2 sa priebežne ukladá do `localStorage`.
+Fáza obrázkov má samostatný stav v `localStorage`.
 
-Ak sa počítač vypne alebo sa Chrome zavrie, rozpracovaný beh rovnakej verzie parsera možno po návrate obnoviť od poslednej nespracovanej objednávky.
+Ak ju zastavíte tlačidlom **Zastaviť obrázky**, už získané obrázky zostanú uložené. Pri ďalšom spustení skript ponúkne pokračovanie od poslednej nespracovanej objednávky.
 
-Medzi jednotlivými detailmi je približne **3 s** pauza a na načítanie jednej detailovej stránky sa čaká maximálne približne **15 s**.
+## Odporúčaný prvý test v0.9.12
 
-## Odporúčaný test v0.9.11
-
-1. Aktualizujte userscript cez **Raw**.
+1. Aktualizujte userscript cez Raw.
 2. Obnovte AliExpress cez `Ctrl+F5`.
-3. Skontrolujte v paneli **v0.9.11 – Details DOM variant v3**.
-4. Vypnite Google Translator.
-5. Otvorte **Account → Orders**.
-6. Fázu 1 znovu nespúšťajte, ak už máte kompletný zoznam Orders.
-7. Spustite **2. Načítať presné údaje z Details**.
-8. Nechajte spracovať približne 8–10 objednávok.
-9. Skontrolujte najmä objednávku `3073820008378237` s viacerými KSD9700 variantmi a objednávku `3073820008558237` s dvoma tlakovými snímačmi.
-10. Kliknite **Zastaviť Details**.
-11. Exportujte **JSON (Orders + Details)** a výsledok skontrolujte pred celým behom 437 objednávok.
+3. Skontrolujte panel **v0.9.12 – Details images v1**.
+4. Overte, že v paneli stále vidíte hotovú vrstvu Details – aktualizácia na 0.9.12 ju nemá vymazať.
+5. Vypnite Google Translator.
+6. Otvorte **Account → Orders**.
+7. Kliknite **3. Načítať obrázky z Details**.
+8. Na prvý test nechajte prejsť približne 5–10 objednávok.
+9. Kliknite **Zastaviť obrázky**.
+10. Exportujte **JSON (Orders + Details + Images)**.
+11. Skontrolujte hlavne viacpoložkové objednávky a objednávku KSD9700 s viacerými variantmi rovnakého produktu.
+
+Až po overení malej vzorky má zmysel nechať fázu obrázkov prejsť celý zoznam.
 
 ## Ovládacie tlačidlá
 
-- **1. Viacnásobne načítať + naskenovať** – fáza 1,
-- **Zastaviť fázu 1** – zastaví ďalšie priechody Orders,
-- **2. Načítať presné údaje z Details** – fáza 2,
-- **Zastaviť Details** – zastaví fázu 2 bez zmazania hotových detailov,
-- **Vymazať iba Details** – zmaže iba detailovú vrstvu a jej stav,
-- **3. Export CSV (Orders)** – export vrstvy Orders,
-- **Export JSON (Orders + Details)** – odporúčaný kontrolný export,
-- **Kopírovať CSV** – skopíruje CSV do schránky,
-- **Vymazať všetky uložené dáta** – zmaže Orders aj Details.
+- **1. Viacnásobne načítať + naskenovať** – fáza Orders,
+- **Zastaviť fázu 1**,
+- **2. Načítať presné údaje z Details**,
+- **Zastaviť Details**,
+- **Vymazať iba Details** – zmaže Details a naviazanú vrstvu obrázkov, Orders ponechá,
+- **3. Načítať obrázky z Details**,
+- **Zastaviť obrázky**,
+- **Vymazať iba obrázky** – Orders aj Details zostanú zachované,
+- **4. Export CSV (Orders)**,
+- **Export JSON (Orders + Details + Images)**,
+- **Kopírovať CSV**,
+- **Vymazať všetky uložené dáta**.
 
-## Obrázky
+## JSON export
 
-Obrázky zatiaľ nie sú cieľom fázy 2. Najprv stabilizujeme:
+Kontrolný JSON teraz obsahuje samostatne:
 
-- počet položiek,
-- názvy,
-- varianty,
-- množstvá,
-- ceny,
-- dátumy,
-- subtotal a total.
+- `multiPass`,
+- `detailState`,
+- `imageState`,
+- `details`,
+- `images`,
+- `rows`.
 
-Až potom bude nasledovať samostatná fáza pre obrázky.
+Tým sa overené údaje Details nemenia pri pokusoch s obrázkami.
+
+## Súkromie
+
+Fáza obrázkov ukladá iba produktové identifikátory a URL produktových obrázkov. Nepridáva meno príjemcu, adresu, telefón, platobnú metódu ani prihlasovacie údaje.
 
 ## Google Translator
 
-Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť text a DOM počas čítania a tým zhoršiť presnosť parsera.
+Pri všetkých fázach odporúčame Google Translator vypnúť. Preklad môže meniť text aj DOM stránky počas čítania.
 
 ## Inštalácia / aktualizácia
 
@@ -236,10 +207,10 @@ Pri skenovaní odporúčame Google Translator vypnúť. Preklad môže meniť te
 3. Tampermonkey ponúkne aktualizáciu existujúceho skriptu.
 4. Uložte skript.
 5. Obnovte AliExpress cez `Ctrl+F5`.
-6. Skontrolujte **v0.9.11 – Details DOM variant v3**.
+6. Skontrolujte **v0.9.12 – Details images v1**.
+
+`@name` zostáva nezmenený, aby Tampermonkey aktualizoval existujúcu líniu skriptu.
 
 ## Poznámka k presnosti
 
-AliExpress môže meniť HTML štruktúru. Preto parser kombinuje text, DOM a už bezpečne uložené údaje z vrstvy Orders.
-
-Ak si nie je istý, údaj nemá domýšľať. Celý text položky zostáva v `productLineText` a neistota sa uvedie v `parserNote`.
+Fáza obrázkov je zámerne prísnejšia než obyčajné „nájdi prvý obrázok“. Ak nie je väzba obrázka na konkrétnu položku dostatočne silná, výsledok má zostať prázdny a označený na kontrolu.
